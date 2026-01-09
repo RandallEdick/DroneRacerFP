@@ -1,0 +1,25 @@
+# Unreal engine temp files
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/**/binaries/*
+Build/**/intermediate/*
+
+# Visual studio / build system
+.vs/
+.vscode/
+*.VC.db
+*.VC.opendb
+*.sln
+*.suo
+*.user
+*.log
+
+# Other
+*.pdb
+*.obj
+*.idb
+*.ipdb
+*.iobj
+*.tmp
