@@ -121,8 +121,13 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight|Thrust")
     float MaxThrustAccel = 2500.f;   // cm/s^2 at full throttle (tune 1500-6000)
 
+    // Full stick up gives this many "g's" upward.
+// 2.0f means full throttle = 2g up (nice DJI-ish feeling).
+    UPROPERTY(EditAnywhere, Category = "Flight|Thrust")
+    float MaxThrustG = 2.0f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight|Thrust")
-    float HoverThrottle = 0.55f;     // throttle01 value that roughly hovers
+    float HoverThrottle = 0.5f;     // throttle01 value that roughly hovers
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight|Thrust")
     float ThrustExpo = 0.7f;         // >1 gives finer control near hover
@@ -161,9 +166,7 @@ protected:
 
     // Smoothed throttle used by physics
     float ThrottleSmoothed = 0.f;
-    /** Maximum lift force at full throttle (Newtons) */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Flight|Physics")
-    float MaxLiftForce = 1000.0f;  //4 x lift force per motor of Kgf per motor.
+
 
     /** Linear drag coefficient */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Flight|Physics")

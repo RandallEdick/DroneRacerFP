@@ -26,21 +26,18 @@ static float ApplyFpvRates(
 	// 1) Expo (cubic blend)
 	float x = (1.f - expo) * stick + expo * stick * stick * stick;
 
-	//ignoring rcRate and superRate
-	return x;
 
+	// 2) RC Rate (linear scaling)
+	float rate = x * rcRate;
 
-	//// 2) RC Rate (linear scaling)
-	//float rate = x * rcRate;
+	// 3) SuperRate (end-stick boost)
+	const float absRate = FMath::Abs(rate);
+	if (absRate > KINDA_SMALL_NUMBER)
+	{
+		rate = rate * (1.f + superRate * absRate / (1.f - absRate));
+	}
 
-	//// 3) SuperRate (end-stick boost)
-	//const float absRate = FMath::Abs(rate);
-	//if (absRate > KINDA_SMALL_NUMBER)
-	//{
-	//	rate = rate * (1.f + superRate * absRate / (1.f - absRate));
-	//}
-
-	//return rate; // still normalized (-∞..∞), scaled later
+	return rate; // still normalized (-∞..∞), scaled later
 }
 
 static float ApplyCubicExpo(float x, float expo)
@@ -614,47 +611,81 @@ void DebugHit(const FHitResult& Hit)
 }
 FVector ADroneFPCharacter::ComputeThrustAccel(float DeltaTime)
 {
-	// Smooth throttle to avoid sudden jumps (especially on arming)
-	ThrottleSmoothed = FMath::FInterpTo(ThrottleSmoothed, Throttle01, DeltaTime, ThrustResponse);
+	// 1) Smooth throttle (unchanged)
+	ThrottleSmoothed = FMath::FInterpTo(
+		ThrottleSmoothed,
+		Throttle01,
+		DeltaTime,
+		ThrustResponse
+	);
 
-	// Map throttle around hover point so that:
-	//  - Throttle01 == HoverThrottle => ~0 net thrust (before gravity)
-	//  - Throttle01 > HoverThrottle  => upward acceleration along drone Up
-	//  - Throttle01 < HoverThrottle  => reduced thrust (still >= 0, you can’t "pull" downward)
+	// 2) Map throttle around hover into t in [-1, +1]
 	float t = 0.f;
 
 	if (ThrottleSmoothed >= HoverThrottle)
 	{
-		// scale  [HoverThrottle..1] -> [0..1]
-		t = (ThrottleSmoothed - HoverThrottle) / FMath::Max(1e-3f, (1.f - HoverThrottle));
+		// scale [HoverThrottle..1] -> [0..1]
+		t = (ThrottleSmoothed - HoverThrottle) /
+			FMath::Max(1e-3f, (1.f - HoverThrottle));
 	}
 	else
 	{
-		// scale [0..HoverThrottle] -> [-1..0] (optional "below hover" behavior)
-		// This reduces thrust relative to hover; we’ll clamp final thrust to >= 0.
-		t = (ThrottleSmoothed - HoverThrottle) / FMath::Max(1e-3f, HoverThrottle);
+		// scale [0..HoverThrottle] -> [-1..0]
+		t = (ThrottleSmoothed - HoverThrottle) /
+			FMath::Max(1e-3f, HoverThrottle);
 	}
 
-	// Apply expo around hover for better fine control
-	const float sign = (t >= 0.f) ? 1.f : -1.f;
-	const float mag = FMath::Pow(FMath::Abs(t), ThrustExpo);
-	const float shaped = sign * mag; // -1..+1 (approximately)
+	// 3) Expo shaping around hover
+	const float Sign = (t >= 0.f) ? 1.f : -1.f;
+	const float Mag = FMath::Pow(FMath::Abs(t), ThrustExpo);
+	const float Shaped = Sign * Mag;   // in [-1 .. +1]
 
-	// Convert to acceleration along drone’s Up axis
-	// shaped=+1 => +MaxThrustAccel
-	// shaped=0  => 0 (at hover throttle)
-	// shaped=-1 => -MaxThrustAccel (but we’ll clamp thrust >= 0 below)
-	FVector accel = GetActorUpVector() * (shaped * MaxThrustAccel);
+	// 4) Convert shaped value into an UPWARD acceleration
 
-	// Drones cannot generate "negative thrust"; clamp so we never accelerate opposite Up due to thrust
-	// (gravity handles downward acceleration)
-	const float alongUp = FVector::DotProduct(accel, GetActorUpVector());
-	if (alongUp < 0.f)
+	// Gravity is negative in UE (e.g. -980 cm/s^2)
+	const float GravityZ = GetWorld()->GetGravityZ();
+	const float HoverAccel = -GravityZ;                 // +g  (about 980 cm/s^2)
+
+	const float MaxUpAccel = HoverAccel * MaxThrustG;   // e.g. 2g at full throttle
+	const float MinUpAccel = 0.f;                       // no thrust
+
+	float UpAccel = HoverAccel; // default at shaped=0 (hover)
+
+	if (Shaped >= 0.f)
 	{
-		accel -= GetActorUpVector() * alongUp; // remove negative component
+		// Shaped in [0..1] → lerp from HoverAccel to MaxUpAccel
+		UpAccel = FMath::Lerp(HoverAccel, MaxUpAccel, Shaped);
 	}
+	else
+	{
+		// Shaped in [-1..0] → lerp from MinUpAccel to HoverAccel
+		// remap [-1..0] -> [0..1]
+		const float Alpha = Shaped + 1.f;  // -1→0, 0→1
+		UpAccel = FMath::Lerp(MinUpAccel, HoverAccel, Alpha);
+	}
+	const float NetZ = UpAccel + GravityZ;          // thrust + gravity
+	// Read current vertical velocity (if you track it):
+	float VelocityZ = 0.f;
+	if (Velocity.IsNearlyZero() == false)    // assuming you have a Velocity member
+	{
+		VelocityZ = Velocity.Z;
+	}
+	float Altitude = GetActorLocation().Z;
 
-	return accel;
+	UE_LOG(LogTemp, Warning,
+		TEXT("THRUST DEBUG | Thr=%.3f Sm=%.3f Hover=%.3f Shaped=%.3f | Up=%.1f Grav=%.1f Net=%.1f | VelZ=%.1f AltZ=%.1f"),
+		Throttle01,
+		ThrottleSmoothed,
+		HoverThrottle,
+		Shaped,
+		UpAccel,
+		GravityZ,
+		NetZ,
+		VelocityZ,
+		Altitude
+	);
+	// 5) Return thrust acceleration along the drone's Up axis
+	return GetActorUpVector() * UpAccel;
 }
 
 float ADroneFPCharacter::GetSurfaceHardness(const FHitResult& Hit) const
