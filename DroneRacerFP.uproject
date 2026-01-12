@@ -24,6 +24,10 @@
 		{
 			"Name": "GaeaUnrealTools",
 			"Enabled": false
+		},
+		{
+			"Name": "RawInput",
+			"Enabled": true
 		}
 	],
 	"TargetPlatforms": [

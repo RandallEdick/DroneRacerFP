@@ -23,32 +23,32 @@ public:
     static FDjiHidReader& Get();
 
     bool Start();
-    void Stop();
+    void Shutdown();           // <-- our own function, NOT FRunnable::Stop
 
     FDjiChannels GetChannels();
 
+    // FRunnable interface
+    virtual uint32 Run() override;
+    virtual void Stop() override;   // this is called by Kill(), we keep it light
+
 private:
     FDjiHidReader();
-    virtual ~FDjiHidReader();
-
-    virtual uint32 Run() override;
-    virtual void StopTask() { bRunning = false; }
+    ~FDjiHidReader();
 
     bool OpenDevice();
     void CloseDevice();
     void DecodeReport(const uint8* Data, int32 Length);
-    bool OpenDevice();
-    uint32 Run();
-
 
 private:
-    class FRunnableThread* Thread = nullptr;
+    FRunnableThread* Thread = nullptr;
     FThreadSafeBool bRunning = false;
 
-    void* DeviceHandle = nullptr; // HANDLE under the hood
+    void* DeviceHandle = nullptr;
+    uint32 InputReportLen = 0;  
     FCriticalSection DataMutex;
     FDjiChannels Channels;
 };
+
 
 #endif // PLATFORM_WINDOWS
 

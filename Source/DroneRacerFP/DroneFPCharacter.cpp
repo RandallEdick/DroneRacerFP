@@ -1,5 +1,5 @@
 ﻿#include "DroneFPCharacter.h"
-
+#include "DjiHidReader.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/InputComponent.h"
@@ -9,6 +9,8 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
+#include "GameFramework/PlayerController.h"
+#include "Engine/Engine.h"
 
 // ===== FPV-style rate calculation (Betaflight-inspired) =====
 static float ApplyFpvRates(
@@ -53,6 +55,21 @@ ADroneFPCharacter::ADroneFPCharacter()
 	PrimaryActorTick.bCanEverTick = true;
 
 
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		for (int i = 0; i < 8; i++)
+		{
+			float v = PC->GetInputAnalogKeyState(
+				FKey(*FString::Printf(TEXT("GenericUSBController Axis%d"), i))
+			);
+
+			if (FMath::Abs(v) > 0.01f)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Axis %d = %f"), i, v);
+			}
+		}
+	}
+
 	// Resize the collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(12.0f, 7.0f);
 
@@ -90,92 +107,7 @@ ADroneFPCharacter::ADroneFPCharacter()
 	AutoPossessPlayer = EAutoReceiveInput::Player0;
 }
 
-//void ADroneFPCharacter::BeginPlay()
-//{
-//	Super::BeginPlay();
-//
-//
-//	Health = MaxHealth;
-//
-//	// Hide / disable arms mesh (no need to destroy)
-//	if (Mesh1P)
-//	{
-//		Mesh1P->SetHiddenInGame(true);
-//		Mesh1P->SetVisibility(false, true);
-//		Mesh1P->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-//	}
-//
-//	UE_LOG(LogTemp, Warning, TEXT("ADroneFPCharacter::BeginPlay (%s)"), *GetNameSafe(GetController()));
-//
-//	// Everything below should be local-only (input + camera)
-//	if (!IsLocallyControlled())
-//	{
-//		return;
-//	}
-//
-//	// ----- Enhanced Input mapping context -----
-//	if (APlayerController* PC = Cast<APlayerController>(GetController()))
-//	{
-//		if (ULocalPlayer* LP = PC->GetLocalPlayer())
-//		{
-//			if (UEnhancedInputLocalPlayerSubsystem* Subsys =
-//				ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(LP))
-//			{
-//				if (IMC_Default)
-//				{
-//					Subsys->AddMappingContext(IMC_Default, 0);
-//					UE_LOG(LogTemp, Warning, TEXT("Added IMC_Default"));
-//				}
-//				else
-//				{
-//					UE_LOG(LogTemp, Error, TEXT("IMC_Default is NULL!"));
-//				}
-//			}
-//		}
-//
-//		// Ensure we view through this pawn (often optional, but fine)
-//		PC->SetViewTarget(this);
-//	}
-//	if (FirstPersonCamera)
-//	{
-//		UE_LOG(LogTemp, Warning, TEXT("Camera attach parent: %s"),
-//			*GetNameSafe(FirstPersonCamera->GetAttachParent()));
-//	}
-//
-//	// ----- Apply camera tilt -----
-//	UE_LOG(LogTemp, Warning, TEXT("Tilt Angle: %f"), CameraTiltDegrees);
-//
-//	if (CameraTiltPivot)
-//	{
-//		CameraTiltPivot->SetRelativeRotation(FRotator(CameraTiltDegrees, 0.f, 0.f));
-//		UE_LOG(LogTemp, Warning, TEXT("Pivot RelRot: %s"), *CameraTiltPivot->GetRelativeRotation().ToString());
-//	}
-//	else
-//	{
-//		UE_LOG(LogTemp, Error, TEXT("CameraTiltPivot is NULL"));
-//	}
-//
-//	if (FirstPersonCamera)
-//	{
-//		FirstPersonCamera->Activate(true);
-//		UE_LOG(LogTemp, Warning, TEXT("Camera WorldRot: %s"), *FirstPersonCamera->GetComponentRotation().ToString());
-//	}
-//	else
-//	{
-//		UE_LOG(LogTemp, Error, TEXT("FirstPersonCamera is NULL"));
-//	}
-//
-//	// ----- Debug what the player is actually seeing -----
-//	if (APlayerController* PC0 = GetWorld()->GetFirstPlayerController())
-//	{
-//		UE_LOG(LogTemp, Warning, TEXT("ViewTarget: %s"), *GetNameSafe(PC0->GetViewTarget()));
-//
-//		FVector CamLoc;
-//		FRotator CamRot;
-//		PC0->GetPlayerViewPoint(CamLoc, CamRot);
-//		UE_LOG(LogTemp, Warning, TEXT("PlayerViewPoint Rot: %s"), *CamRot.ToString());
-//	}
-//}
+
 void ADroneFPCharacter::BeginPlay()
 {
 	Super::BeginPlay();
@@ -183,6 +115,9 @@ void ADroneFPCharacter::BeginPlay()
 	// Initialize health
 	Health = MaxHealth;
 
+//#if PLATFORM_WINDOWS
+//	FDjiHidReader::Get().Start();
+//#endif
 	UE_LOG(LogTemp, Warning, TEXT("ADroneFPCharacter::BeginPlay (%s)"),
 		IsLocallyControlled() ? TEXT("Local") : TEXT("Remote"));
 
@@ -342,6 +277,24 @@ void ADroneFPCharacter::Tick(float DeltaTime)
 		return;
 	}
 
+#if PLATFORM_WINDOWS
+	const FDjiChannels Dji = FDjiHidReader::Get().GetChannels();
+
+	if (FMath::Abs(Dji.Roll) > 0.02f ||
+		FMath::Abs(Dji.Pitch) > 0.02f ||
+		FMath::Abs(Dji.Yaw) > 0.02f ||
+		Dji.Throttle > 0.02f)
+	{
+		RollInput = Dji.Roll;
+		PitchInput = Dji.Pitch;
+		YawInput = Dji.Yaw;
+		Throttle01 = Dji.Throttle;
+
+		UE_LOG(LogTemp, Warning,
+			TEXT("DJI: Roll=%.3f Pitch=%.3f Yaw=%.3f Throttle=%.3f"),
+			Dji.Roll, Dji.Pitch, Dji.Yaw, Dji.Throttle);
+	}
+#endif
 	// Prevent PIE hitches from causing huge impulses
 	DeltaTime = FMath::Min(DeltaTime, 1.f / 30.f);
 
@@ -840,4 +793,12 @@ void ADroneFPCharacter::Look(const FInputActionValue& Value)
 			-1, 0.f, FColor::Cyan,
 			FString::Printf(TEXT("Look: X=%.2f Y=%.2f"), X, Y));
 	}
+}
+void ADroneFPCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+#if PLATFORM_WINDOWS
+	FDjiHidReader::Get().Shutdown();   // <-- NOT Stop()
+#endif
+
+	Super::EndPlay(EndPlayReason);
 }
