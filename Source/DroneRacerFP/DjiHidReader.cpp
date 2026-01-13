@@ -1,267 +1,411 @@
-// DjiHidReader.cpp
-#include "DjiHidReader.h"
+ï»¿#include "DjiHidReader.h"
+
+#include "HAL/PlatformProcess.h"
+#include "Misc/ScopeLock.h"
+#include "Misc/AssertionMacros.h"
+#include "Containers/Array.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogDjiHid, Log, All);
+
+// ============================================================================
+//  Windows HID headers (only on Windows)
+// ============================================================================
+
+#if PLATFORM_WINDOWS
 
 #include "Windows/AllowWindowsPlatformTypes.h"
+
 #include <windows.h>
-#include <setupapi.h>
 #include <hidsdi.h>
+#include <setupapi.h>
+
+#pragma comment(lib, "hid.lib")
+#pragma comment(lib, "setupapi.lib")
+
 #include "Windows/HideWindowsPlatformTypes.h"
 
-#pragma comment(lib, "setupapi.lib")
-#pragma comment(lib, "hid.lib")
+#endif // PLATFORM_WINDOWS
 
-static const USHORT DJI_VENDOR = 0x2CA3;
-static const USHORT DJI_PRODUCT = 0x1020;
+// ============================================================================
+//  Singleton plumbing
+// ============================================================================
 
 FDjiHidReader& FDjiHidReader::Get()
 {
-    static FDjiHidReader Instance;
-    return Instance;
+    static FDjiHidReader Singleton;
+    return Singleton;
 }
 
-FDjiHidReader::FDjiHidReader() {}
+FDjiHidReader::FDjiHidReader()
+    : Thread(nullptr)
+    , bStopRequested(false)
+#if PLATFORM_WINDOWS
+    , DeviceHandle(nullptr)
+    , InputReportLen(0)
+#endif
+{
+    FMemory::Memzero(&Channels, sizeof(Channels));
+}
 
 FDjiHidReader::~FDjiHidReader()
 {
     Shutdown();
 }
 
-bool FDjiHidReader::Start()
+void FDjiHidReader::Start()
 {
-    if (Thread) return true;          // already running
+    if (Thread)
+    {
+        return; // already running
+    }
 
-    if (!OpenDevice())
-        return false;
+    bStopRequested = false;
 
-    bRunning = true;
-    Thread = FRunnableThread::Create(this, TEXT("DjiHidReader"), 0, TPri_Normal);
-    return Thread != nullptr;
+    Thread = FRunnableThread::Create(
+        this,
+        TEXT("DJI_HID_Reader"),
+        0,
+        TPri_Normal);
+
+    if (!Thread)
+    {
+        UE_LOG(LogDjiHid, Error, TEXT("FDjiHidReader: failed to create thread"));
+    }
 }
 
-// FRunnable::Stop – called by engine when thread is being killed
-void FDjiHidReader::Stop()
-{
-    // DO NOT touch Thread here – just signal the loop to exit
-    bRunning = false;
-}
 void FDjiHidReader::Shutdown()
 {
-    bRunning = false;
+    bStopRequested = true;
 
     if (Thread)
     {
-        Thread->WaitForCompletion();  // join
+        Thread->WaitForCompletion();
         delete Thread;
         Thread = nullptr;
     }
 
+#if PLATFORM_WINDOWS
     CloseDevice();
+#endif
 }
-FDjiChannels FDjiHidReader::GetChannels()
+
+FDjiChannels FDjiHidReader::GetChannels() const
 {
-    FScopeLock Lock(&DataMutex);
+    FScopeLock Lock(&ChannelsMutex);
     return Channels;
 }
-bool FDjiHidReader::OpenDevice()
-{
-    CloseDevice();
 
-    UE_LOG(LogTemp, Warning, TEXT("DJI: Scanning HID devices"));
+bool FDjiHidReader::Init()
+{
+    return true;
+}
+
+void FDjiHidReader::Stop()
+{
+    bStopRequested = true;
+}
+
+uint32 FDjiHidReader::Run()
+{
+#if !PLATFORM_WINDOWS
+    return 0;
+#else
+    UE_LOG(LogDjiHid, Warning, TEXT("DJI: Run loop starting"));
+
+    while (!bStopRequested)
+    {
+        // Ensure device is open
+        if (DeviceHandle == nullptr)
+        {
+            OpenDevice();
+
+            if (DeviceHandle == nullptr)
+            {
+                FPlatformProcess::SleepNoStats(1.0f);
+                continue;
+            }
+        }
+
+        if (InputReportLen <= 0)
+        {
+            FPlatformProcess::SleepNoStats(0.1f);
+            continue;
+        }
+
+        TArray<uint8> Buffer;
+        Buffer.SetNumZeroed(InputReportLen);
+
+        HANDLE Handle = static_cast<HANDLE>(DeviceHandle);
+
+        // Simple blocking read via HidD_GetInputReport
+        BOOLEAN bOk = HidD_GetInputReport(
+            Handle,
+            Buffer.GetData(),
+            Buffer.Num());
+
+        if (!bOk)
+        {
+            DWORD Err = GetLastError();
+            UE_LOG(LogDjiHid, Warning,
+                TEXT("DJI: HidD_GetInputReport failed (err=%lu)"), Err);
+
+            FPlatformProcess::SleepNoStats(0.01f);
+            continue;
+        }
+
+        // ---- DEBUG: dump raw bytes when they change ----
+        {
+            static TArray<uint8> LastBuf;
+            if (LastBuf.Num() != Buffer.Num())
+            {
+                LastBuf.SetNumZeroed(Buffer.Num());
+            }
+
+            if (FMemory::Memcmp(LastBuf.GetData(), Buffer.GetData(), Buffer.Num()) != 0)
+            {
+                FString BytesStr;
+                for (int32 i = 0; i < Buffer.Num(); ++i)
+                {
+                    BytesStr += FString::Printf(TEXT("%02X "), Buffer[i]);
+                }
+
+                UE_LOG(LogDjiHid, Warning,
+                    TEXT("DJI RAW [%d]: %s"), Buffer.Num(), *BytesStr);
+
+                FMemory::Memcpy(LastBuf.GetData(), Buffer.GetData(), Buffer.Num());
+            }
+        }
+
+        // Parse into roll / pitch / yaw / throttle
+        ParseReport(Buffer.GetData(), Buffer.Num());
+
+        FPlatformProcess::SleepNoStats(0.002f);
+    }
+
+    UE_LOG(LogDjiHid, Warning, TEXT("DJI: Run loop exiting"));
+    return 0;
+#endif // PLATFORM_WINDOWS
+}
+
+// ============================================================================
+//  Windows HID helpers
+// ============================================================================
+
+#if PLATFORM_WINDOWS
+
+void FDjiHidReader::OpenDevice()
+{
+    if (DeviceHandle != nullptr)
+    {
+        return; // already open
+    }
+
+    UE_LOG(LogDjiHid, Warning, TEXT("DJI: Scanning HID devices"));
 
     GUID HidGuid;
     HidD_GetHidGuid(&HidGuid);
 
-    HDEVINFO DevInfo = SetupDiGetClassDevs(&HidGuid, nullptr, nullptr,
-        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (DevInfo == INVALID_HANDLE_VALUE)
+    HDEVINFO DevInfoSet = SetupDiGetClassDevs(
+        &HidGuid,
+        nullptr,
+        nullptr,
+        DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
+
+    if (DevInfoSet == INVALID_HANDLE_VALUE)
     {
-        UE_LOG(LogTemp, Error, TEXT("DJI: SetupDiGetClassDevs failed"));
-        return false;
+        UE_LOG(LogDjiHid, Error, TEXT("DJI: SetupDiGetClassDevs failed"));
+        return;
     }
 
-    SP_DEVICE_INTERFACE_DATA IfData;
-    IfData.cbSize = sizeof(IfData);
+    SP_DEVICE_INTERFACE_DATA IfaceData;
+    FMemory::Memzero(&IfaceData, sizeof(IfaceData));
+    IfaceData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
 
-    HANDLE BestHandle = INVALID_HANDLE_VALUE;
-    uint32 BestInputLen = 0;
-    USHORT BestUsagePage = 0;
-    USHORT BestUsage = 0;
+    const USHORT TargetVid = 0x2CA3; // DJI
+    const USHORT TargetPid = 0x1020; // FPV Remote Controller 2
 
-    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(DevInfo, nullptr, &HidGuid, i, &IfData); ++i)
+    DWORD Index = 0;
+    bool bFound = false;
+
+    while (SetupDiEnumDeviceInterfaces(
+        DevInfoSet,
+        nullptr,
+        &HidGuid,
+        Index,
+        &IfaceData))
     {
-        DWORD RequiredSize = 0;
-        SetupDiGetDeviceInterfaceDetail(DevInfo, &IfData, nullptr, 0, &RequiredSize, nullptr);
-        if (RequiredSize == 0) continue;
+        ++Index;
 
-        TArray<uint8> Buffer;
-        Buffer.SetNumUninitialized(RequiredSize);
-        auto* Detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA*>(Buffer.GetData());
-        Detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+        DWORD DetailSize = 0;
+        SetupDiGetDeviceInterfaceDetail(
+            DevInfoSet,
+            &IfaceData,
+            nullptr,
+            0,
+            &DetailSize,
+            nullptr);
 
-        if (!SetupDiGetDeviceInterfaceDetail(DevInfo, &IfData, Detail,
-            RequiredSize, nullptr, nullptr))
+        if (DetailSize == 0)
         {
             continue;
         }
 
-        HANDLE Handle = CreateFileW(
-            Detail->DevicePath,
+        TArray<uint8> DetailBuffer;
+        DetailBuffer.SetNumZeroed(DetailSize);
+
+        auto DetailData =
+            reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA*>(DetailBuffer.GetData());
+        DetailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+
+        if (!SetupDiGetDeviceInterfaceDetail(
+            DevInfoSet,
+            &IfaceData,
+            DetailData,
+            DetailSize,
+            nullptr,
+            nullptr))
+        {
+            continue;
+        }
+
+        const TCHAR* DevicePath = DetailData->DevicePath;
+
+        HANDLE TestHandle = CreateFile(
+            DevicePath,
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             nullptr,
             OPEN_EXISTING,
-            0,
+            FILE_ATTRIBUTE_NORMAL,
             nullptr);
 
-        if (Handle == INVALID_HANDLE_VALUE)
+        if (TestHandle == INVALID_HANDLE_VALUE)
+        {
             continue;
+        }
 
         HIDD_ATTRIBUTES Attr;
-        Attr.Size = sizeof(Attr);
-        if (!HidD_GetAttributes(Handle, &Attr))
+        Attr.Size = sizeof(HIDD_ATTRIBUTES);
+        if (!HidD_GetAttributes(TestHandle, &Attr))
         {
-            CloseHandle(Handle);
+            CloseHandle(TestHandle);
             continue;
         }
 
-        // Only consider DJI VID/PID
-        if (Attr.VendorID != DJI_VENDOR || Attr.ProductID != DJI_PRODUCT)
+        if (Attr.VendorID != TargetVid || Attr.ProductID != TargetPid)
         {
-            CloseHandle(Handle);
+            CloseHandle(TestHandle);
             continue;
         }
 
-        // Get caps (usage & report sizes)
+        // Get caps so we know report sizes / usage
         PHIDP_PREPARSED_DATA Preparsed = nullptr;
-        if (!HidD_GetPreparsedData(Handle, &Preparsed) || !Preparsed)
+        if (!HidD_GetPreparsedData(TestHandle, &Preparsed) || !Preparsed)
         {
-            CloseHandle(Handle);
+            CloseHandle(TestHandle);
             continue;
         }
 
         HIDP_CAPS Caps;
+        FMemory::Memzero(&Caps, sizeof(Caps));
+
         NTSTATUS Status = HidP_GetCaps(Preparsed, &Caps);
         HidD_FreePreparsedData(Preparsed);
 
         if (Status != HIDP_STATUS_SUCCESS)
         {
-            CloseHandle(Handle);
+            CloseHandle(TestHandle);
             continue;
         }
 
-        UE_LOG(LogTemp, Warning,
-            TEXT("DJI candidate: VID=%04X PID=%04X UsagePage=0x%04X Usage=0x%04X  In=%u Out=%u Feat=%u"),
+        UE_LOG(LogDjiHid, Warning,
+            TEXT("DJI candidate: VID=%04X PID=%04X UsagePage=0x%04X Usage=0x%04X  In=%d Out=%d Feat=%d"),
             Attr.VendorID, Attr.ProductID,
             Caps.UsagePage, Caps.Usage,
             Caps.InputReportByteLength,
             Caps.OutputReportByteLength,
             Caps.FeatureReportByteLength);
 
-        // Prefer Generic Desktop / Joystick or Gamepad
-        const bool bIsJoystick =
-            (Caps.UsagePage == 0x01) && (Caps.Usage == 0x04 || Caps.Usage == 0x05);
+        DeviceHandle = TestHandle;
+        InputReportLen = Caps.InputReportByteLength;
 
-        if (bIsJoystick)
-        {
-            // Take the first joystick-style interface and stop searching
-            BestHandle = Handle;
-            BestInputLen = Caps.InputReportByteLength;
-            BestUsagePage = Caps.UsagePage;
-            BestUsage = Caps.Usage;
-            break;
-        }
+        UE_LOG(LogDjiHid, Warning,
+            TEXT("DJI: Selected interface UsagePage=0x%04X Usage=0x%04X InputReportLen=%d"),
+            Caps.UsagePage, Caps.Usage, InputReportLen);
 
-        // Not the joystick interface – close and continue
-        CloseHandle(Handle);
+        bFound = true;
+        break;
     }
 
-    SetupDiDestroyDeviceInfoList(DevInfo);
+    SetupDiDestroyDeviceInfoList(DevInfoSet);
 
-    if (BestHandle == INVALID_HANDLE_VALUE)
+    if (!bFound)
     {
-        UE_LOG(LogTemp, Error,
-            TEXT("DJI: No joystick/gamepad HID interface found for VID=%04X PID=%04X"),
-            DJI_VENDOR, DJI_PRODUCT);
-        return false;
+        UE_LOG(LogDjiHid, Warning, TEXT("DJI: No matching HID device found"));
     }
-
-    DeviceHandle = BestHandle;
-    InputReportLen = BestInputLen;
-
-    UE_LOG(LogTemp, Warning,
-        TEXT("DJI: Selected interface UsagePage=0x%04X Usage=0x%04X InputReportLen=%u"),
-        BestUsagePage, BestUsage, InputReportLen);
-
-    return true;
+    else
+    {
+        UE_LOG(LogDjiHid, Warning, TEXT("DJI: Device opened, run loop will start reading"));
+    }
 }
-
 
 void FDjiHidReader::CloseDevice()
 {
     if (DeviceHandle)
     {
-        CloseHandle(DeviceHandle);
+        HANDLE Handle = static_cast<HANDLE>(DeviceHandle);
+        CloseHandle(Handle);
         DeviceHandle = nullptr;
+        InputReportLen = 0;
     }
 }
 
-uint32 FDjiHidReader::Run()
-{
-    UE_LOG(LogTemp, Warning, TEXT("DJI: Run loop started"));
+#endif // PLATFORM_WINDOWS
 
-    if (!DeviceHandle || InputReportLen == 0)
+// ============================================================================
+//  ParseReport â€“ TEMP mapping until we refine it
+// ============================================================================
+
+void FDjiHidReader::ParseReport(const uint8* Data, int32 Len)
+{
+    if (!Data || Len <= 0)
     {
-        UE_LOG(LogTemp, Error,
-            TEXT("DJI: Run has no DeviceHandle or InputReportLen=0"));
-        return 0;
+        return;
     }
 
-    // InputReportLen already includes the report ID byte
-    TArray<uint8> Buffer;
-    Buffer.SetNumUninitialized(InputReportLen);
-
-    while (bRunning && DeviceHandle)
-    {
-        // Clear and set report ID 0 (most devices use 0 for the first report)
-        FMemory::Memset(Buffer.GetData(), 0, InputReportLen);
-        Buffer[0] = 0x00;   // report ID; try 0 first
-
-        BOOLEAN Ok = HidD_GetInputReport(DeviceHandle,
-            Buffer.GetData(),
-            InputReportLen);
-
-        if (!Ok)
+    // Helper to read little-endian 16-bit values
+    auto Read16 = [&](int Offset) -> uint16
         {
-            // HidD_* doesn’t always set GetLastError meaningfully, so this is mostly FYI
-            DWORD Err = GetLastError();
-            UE_LOG(LogTemp, Warning,
-                TEXT("DJI: HidD_GetInputReport failed (err=%lu)"),
-                Err);
-            FPlatformProcess::Sleep(0.01f);
-            continue;
-        }
+            if (Offset + 1 >= Len) return 0;
+            return uint16(Data[Offset]) | (uint16(Data[Offset + 1]) << 8);
+        };
 
-        UE_LOG(LogTemp, Warning,
-            TEXT("DJI: Got %u bytes via GetInputReport"), InputReportLen);
+    // *** TEMPORARY OFFSETS â€“ WE WILL REFINE THESE FROM RAW LOGS ***
+    uint16 RawYaw = Read16(1); // bytes 1â€“2
+    uint16 RawThrottle = Read16(3); // bytes 3â€“4
+    uint16 RawRoll = Read16(5); // bytes 5â€“6
+    uint16 RawPitch = Read16(7); // bytes 7â€“8
 
-        DecodeReport(Buffer.GetData(), (int32)InputReportLen);
+    constexpr float Center = 2048.0f;  // placeholder centre
+    constexpr float Span = 2048.0f;  // placeholder half-range
 
-        // Small delay so we don’t hammer the device
-        FPlatformProcess::Sleep(0.005f);
-    }
+    auto Norm = [&](uint16 v) -> float
+        {
+            return FMath::Clamp((float(v) - Center) / Span, -1.0f, 1.0f);
+        };
 
-    UE_LOG(LogTemp, Warning, TEXT("DJI: Run loop exiting"));
-    return 0;
-}
+    FDjiChannels Local;
+    Local.Yaw = Norm(RawYaw);
+    Local.Roll = Norm(RawRoll);
+    Local.Pitch = -Norm(RawPitch);                      // flip so stick fwd = nose-down
+    Local.Throttle = 0.5f * (Norm(RawThrottle) + 1.0f);    // -1..1 â†’ 0..1
 
-void FDjiHidReader::DecodeReport(const uint8* Data, int32 Length)
-{
-    FString Hex;
-    for (int32 i = 0; i < Length; ++i)
     {
-        Hex += FString::Printf(TEXT("%02X "), Data[i]);
+        FScopeLock Lock(&ChannelsMutex);
+        Channels = Local;
     }
-    UE_LOG(LogTemp, Warning, TEXT("DJI HID (%d): %s"), Length, *Hex);
 
-    // TODO: Once we see real data here, we’ll map it to Channels.Roll/Pitch/Yaw/Throttle.
+    UE_LOG(LogDjiHid, Warning,
+        TEXT("DJI: Roll=%.3f Pitch=%.3f Yaw=%.3f Throttle=%.3f"),
+        Local.Roll, Local.Pitch, Local.Yaw, Local.Throttle);
 }
