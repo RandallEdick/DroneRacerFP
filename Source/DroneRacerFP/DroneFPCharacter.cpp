@@ -277,24 +277,7 @@ void ADroneFPCharacter::Tick(float DeltaTime)
 		return;
 	}
 
-	//if (APlayerController* PC = Cast<APlayerController>(GetController()))
-	//{
-	//	const float Axis1 = PC->GetInputAnalogKeyState(FKey(TEXT("GenericUSBController Axis 1")));
-	//	const float Axis2 = PC->GetInputAnalogKeyState(FKey(TEXT("GenericUSBController Axis 2")));
-	//	const float Axis3 = PC->GetInputAnalogKeyState(FKey(TEXT("GenericUSBController Axis 3")));
-	//	const float Axis4 = PC->GetInputAnalogKeyState(FKey(TEXT("GenericUSBController Axis 4")));
 
-	//	// Only spam if something is non-zero
-	//	if (FMath::Abs(Axis1) > 0.01f ||
-	//		FMath::Abs(Axis2) > 0.01f ||
-	//		FMath::Abs(Axis3) > 0.01f ||
-	//		FMath::Abs(Axis4) > 0.01f)
-	//	{
-	//		UE_LOG(LogTemp, Warning,
-	//			TEXT("DJI RAW AXES | A1=%.3f A2=%.3f A3=%.3f A4=%.3f"),
-	//			Axis1, Axis2, Axis3, Axis4);
-	//	}
-	//}
 #if PLATFORM_WINDOWS
 	const FDjiChannels Dji = FDjiHidReader::Get().GetChannels();
 

@@ -1,10 +1,12 @@
 ﻿#include "DjiHidReader.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 
 DEFINE_LOG_CATEGORY(LogDjiHid);
 
 #if PLATFORM_WINDOWS
 
-// Make Windows types available in a safe way for UE
+// Safe include of Windows headers in UE
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <windows.h>
 #include <hidsdi.h>
@@ -15,6 +17,10 @@ DEFINE_LOG_CATEGORY(LogDjiHid);
 #include "Windows/HideWindowsPlatformTypes.h"
 
 #endif // PLATFORM_WINDOWS
+
+// DJI FPV Controller 2 VID/PID
+static constexpr uint16 VendorId = 0x2CA3;
+static constexpr uint16 ProductId = 0x1020;
 
 // ---------------------------------------------------------
 // Singleton
@@ -32,7 +38,8 @@ FDjiHidReader::FDjiHidReader()
 
 FDjiHidReader::~FDjiHidReader()
 {
-    Stop();
+    // Do NOT call Stop() here.
+    // Shutdown is handled explicitly by game code (EndPlay/GameInstance).
 }
 
 // ---------------------------------------------------------
@@ -62,17 +69,28 @@ void FDjiHidReader::Start()
 
 void FDjiHidReader::Stop()
 {
+    // Just signal the thread to exit its loop.
     bStopRequested = true;
 
+    // IMPORTANT:
+    // Do NOT wait on the thread or close the device here.
+    // On process exit (packaged build), OS cleanup is enough.
+    // In editor, this avoids shutting things down after engine systems are half-dead.
+
+    // You can optionally do this in debug builds if you really want to try to wait:
+    /*
     if (Thread)
     {
-        Thread->Kill(true);   // wait for thread to exit
+        Thread->Kill(true);  // force-kill; only safe now that destructor does not call Stop()
         delete Thread;
         Thread = nullptr;
     }
+    */
 
-    CloseDevice();
+    // And avoid calling CloseDevice() here; let OS tear down the handle.
+    // CloseDevice();
 }
+
 
 // ---------------------------------------------------------
 // FRunnable
@@ -95,6 +113,8 @@ uint32 FDjiHidReader::Run()
     TArray<uint8> Buffer;
     TArray<uint8> LastBuffer;
 
+    bool bLoggedDeviceOff = false;
+
     while (!bStopRequested)
     {
         // 1) Ensure device is open
@@ -102,10 +122,22 @@ uint32 FDjiHidReader::Run()
         {
             if (!OpenDevice())
             {
-                // Couldn’t open – wait a bit and try again
+                // Couldn’t open – wait a bit and try again, don’t spam logs.
+                if (!bLoggedDeviceOff)
+                {
+                    UE_LOG(LogDjiHid, Warning,
+                        TEXT("DJI: Could not open HID device (VID=%04X PID=%04X). "
+                            "Controller may be off; will retry."),
+                        VendorId, ProductId);
+                    bLoggedDeviceOff = true;
+                }
+
                 FPlatformProcess::Sleep(0.5f);
                 continue;
             }
+
+            // Successfully opened
+            bLoggedDeviceOff = false;
         }
 
         const uint32 ReportLen = (InputReportLen > 0) ? InputReportLen : 64u;
@@ -125,15 +157,34 @@ uint32 FDjiHidReader::Run()
         if (!bOk || BytesRead == 0)
         {
             const DWORD Err = ::GetLastError();
-            UE_LOG(LogDjiHid, Warning,
-                TEXT("DJI: ReadFile failed (err=%lu, bytes=%lu)"), Err, BytesRead);
 
-            // If the device disappeared or got reset, close so we can re-open.
+            // Device unplugged / powered off / reset.
             if (Err == ERROR_DEVICE_NOT_CONNECTED ||
                 Err == ERROR_GEN_FAILURE ||
                 Err == ERROR_OPERATION_ABORTED)
             {
+                if (!bLoggedDeviceOff)
+                {
+                    UE_LOG(LogDjiHid, Warning,
+                        TEXT("DJI: ReadFile device error (err=%lu). Controller likely off/disconnected; will retry."),
+                        Err);
+                    bLoggedDeviceOff = true;
+                }
+
                 CloseDevice();
+            }
+            else
+            {
+                // Other transient error - log occasionally.
+                static double LastErrLogTime = 0.0;
+                const double Now = FPlatformTime::Seconds();
+                if (Now - LastErrLogTime > 1.0)
+                {
+                    UE_LOG(LogDjiHid, Warning,
+                        TEXT("DJI: ReadFile failed (err=%lu, bytes=%lu)"),
+                        Err, BytesRead);
+                    LastErrLogTime = Now;
+                }
             }
 
             FPlatformProcess::Sleep(0.01f);
@@ -143,13 +194,12 @@ uint32 FDjiHidReader::Run()
         // Trim buffer to bytes actually read
         Buffer.SetNum(BytesRead, /*bAllowShrinking=*/false);
 
-        // Optional: log raw bytes when they change (for debugging mapping)
+#if 0   // set to 1 to see raw bytes when they change
         if (LastBuffer.Num() != Buffer.Num() ||
             FMemory::Memcmp(LastBuffer.GetData(), Buffer.GetData(), Buffer.Num()) != 0)
         {
             LastBuffer = Buffer;
 
-#if 1   // set to 0 to silence raw dumps
             FString BytesStr;
             for (int32 i = 0; i < Buffer.Num(); ++i)
             {
@@ -157,9 +207,10 @@ uint32 FDjiHidReader::Run()
             }
             UE_LOG(LogDjiHid, Verbose, TEXT("DJI RAW [%d]: %s"),
                 Buffer.Num(), *BytesStr);
-#endif
         }
+#endif
 
+        // Parse bytes into channels (this is your old, working mapping).
         ParseReport(Buffer.GetData(), Buffer.Num());
     }
 
@@ -264,7 +315,7 @@ bool FDjiHidReader::FindDevicePath(FString& OutDevicePath, uint16& OutInputRepor
         return false;
     }
 
-    bool bFound = false;
+    bool  bFound = false;
     DWORD Index = 0;
 
     while (!bFound)
@@ -346,8 +397,7 @@ bool FDjiHidReader::FindDevicePath(FString& OutDevicePath, uint16& OutInputRepor
                         Caps.UsagePage, Caps.Usage,
                         (uint32)Caps.InputReportByteLength);
 
-                    // NOTE: if there were multiple interfaces we could filter by Usage/UsagePage here.
-                    // For now we just take the first matching HID interface.
+                    // Take the first matching HID interface.
                     OutDevicePath = DetailData->DevicePath;
                     bFound = true;
                 }
@@ -378,20 +428,19 @@ bool FDjiHidReader::FindDevicePath(FString& OutDevicePath, uint16& OutInputRepor
 }
 
 // ---------------------------------------------------------
-// Report parsing
+// Report parsing (your original, working mapping)
 // ---------------------------------------------------------
 
 /**
- * VERY IMPORTANT: This is still a guess at the packet layout.
- * Your current device reports 12 bytes. We assume:
+ * Mapping guess for the 12-byte packet:
  *   Byte 0: Report ID (ignored)
  *   Bytes 1-2: Roll    (int16, -32768..32767)
  *   Bytes 3-4: Pitch   (int16)
  *   Bytes 5-6: Yaw     (int16)
- *   Bytes 7-8: Throttle(int16, but we remap to 0..1)
+ *   Bytes 7-8: Throttle(int16, then remap to 0..1)
  * The remaining bytes are ignored for now.
  *
- * Use the Verbose RAW logs to refine this mapping later.
+ * You can refine this later using RAW logs if needed.
  */
 void FDjiHidReader::ParseReport(const uint8* Data, int32 Length)
 {
