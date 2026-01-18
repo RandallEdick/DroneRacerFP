@@ -1,73 +1,93 @@
+// DjiHidReader.h
+
 #pragma once
 
 #include "CoreMinimal.h"
 #include "HAL/Runnable.h"
+#include "HAL/ThreadSafeBool.h"
 #include "HAL/CriticalSection.h"
-#include "HAL/RunnableThread.h"
+#include "Delegates/DelegateCombinations.h"
+#include "Templates/UniquePtr.h"
+
+class FRunnableThread;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogDjiHid, Log, All);
 
-// Simple normalized channel bundle for the drone.
-struct FDjiChannels
-{
-    float Roll = 0.f;  // -1..+1
-    float Pitch = 0.f;  // -1..+1
-    float Yaw = 0.f;  // -1..+1
-    float Throttle = 0.f;  // 0..1
-};
-
-/**
- * FDjiHidReader
- *
- * - Singleton FRunnable that reads the DJI FPV Controller 2 via HID.
- * - Updates FDjiChannels, which your DroneFPCharacter reads via GetChannels().
- * - Safe Stop() (no Kill(true)), and mild logging when device is disconnected.
- */
 class FDjiHidReader : public FRunnable
 {
 public:
-    static FDjiHidReader& Get();
 
-    /** Start the background reader thread (no-op if already running). */
-    void Start();
+	/** Delegate fired whenever we receive an input report from the device. */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnInputReport, const TArray<uint8>&);
 
-    /** Stop the background reader thread and close the device. */
-    void Stop();
+	// ------------------ NEW: Channel struct ------------------
+	struct FDjiChannels
+	{
+		// Raw integer values from HID (you can adapt types as needed)
+		int16 LeftXRaw = 0;
+		int16 LeftYRaw = 0;
+		int16 RightXRaw = 0;
+		int16 RightYRaw = 0;
 
-    /** Thread entry points. */
-    virtual bool Init() override;
-    virtual uint32 Run() override;
-    virtual void Exit() override;
+		// Normalized 0..1 (or -1..1) versions
+		float LeftX01 = 0.f;
+		float LeftY01 = 0.f;
+		float RightX01 = 0.f;
+		float RightY01 = 0.f;
 
-    /** Get a snapshot of the current channels (thread-safe copy). */
-    FDjiChannels GetChannels() const;
+		// Throttle or other channels if you need them
+		float Throttle01 = 0.f;
+	};
+
+	/** Singleton accessor. Creates the instance on first use with default args. */
+	static FDjiHidReader& Get();
+
+	/** Returns true if the singleton instance has already been created. */
+	static bool IsCreated();
+
+	FDjiHidReader(const FString& InDevicePath = TEXT(""), uint32 InInputReportLen = 0u);
+	virtual ~FDjiHidReader();
+
+	bool Start();
+	void Shutdown();
+
+	// FRunnable
+	virtual uint32 Run() override;
+	virtual void Stop() override;
+	virtual void Exit() override;
+
+	/** Multicast delegate broadcast from the worker thread with each HID report. */
+	FOnInputReport OnInputReport;
+	FOnInputReport& GetOnInputReport() { return OnInputReport; }
+
+	void SetDevicePath(const FString& InPath) { DevicePath = InPath; }
+	void SetInputReportLen(uint32 InLen) { InputReportLen = InLen; }
+
+	// ------------------ NEW: GetChannels API ------------------
+	FDjiChannels GetChannels() const;
 
 private:
-    FDjiHidReader();
-    ~FDjiHidReader();
 
-    // Non-copyable
-    FDjiHidReader(const FDjiHidReader&) = delete;
-    FDjiHidReader& operator=(const FDjiHidReader&) = delete;
+	// Singleton state
+	static TUniquePtr<FDjiHidReader> Instance;
+	static FCriticalSection          InstanceMutex;
 
-private:
-    // HID helpers
-    bool OpenDevice();
-    void CloseDevice();
-    bool FindDevicePath(FString& OutDevicePath, uint16& OutInputReportLen);
+	// Instance state
+	FString       DevicePath;
+	uint32        InputReportLen;
+	FRunnableThread* Thread;
+	FThreadSafeBool  bStopRequested;
 
-    void ParseReport(const uint8* Data, int32 Length);
+	// ------------------ NEW: Channels and mutex ------------------
+	mutable FCriticalSection ChannelsMutex;
+	FDjiChannels             Channels;
 
-private:
-    // Thread stuff
-    FRunnableThread* Thread = nullptr;
-    volatile bool    bStopRequested = false;
+#if PLATFORM_WINDOWS
+	// Opaque Win32 handles
+	void* DeviceHandle;   // HANDLE
+	void* StopEvent;      // HANDLE
 
-    // HID device
-    void* DeviceHandle = nullptr;
-    uint16 InputReportLen = 0;
-
-    // Channel state
-    mutable FCriticalSection ChannelsMutex;
-    FDjiChannels             Channels;
+	bool OpenDevice();
+	void CloseWindowsHandles();
+#endif
 };

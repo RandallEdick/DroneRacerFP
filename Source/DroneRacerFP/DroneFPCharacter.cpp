@@ -12,6 +12,9 @@
 #include "GameFramework/PlayerController.h"
 #include "Engine/Engine.h"
 
+// Alias the channel struct from the HID reader so we can write FDjiChannels
+using FDjiChannels = FDjiHidReader::FDjiChannels;
+
 // ===== FPV-style rate calculation (Betaflight-inspired) =====
 static float ApplyFpvRates(
 	float stick,      // -1..1
@@ -27,7 +30,6 @@ static float ApplyFpvRates(
 
 	// 1) Expo (cubic blend)
 	float x = (1.f - expo) * stick + expo * stick * stick * stick;
-
 
 	// 2) RC Rate (linear scaling)
 	float rate = x * rcRate;
@@ -50,10 +52,10 @@ static float ApplyCubicExpo(float x, float expo)
 	// Blend linear and cubic: (1-e)*x + e*x^3
 	return (1.f - expo) * x + expo * x * x * x;
 }
+
 ADroneFPCharacter::ADroneFPCharacter()
 {
 	PrimaryActorTick.bCanEverTick = true;
-
 
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
@@ -107,7 +109,6 @@ ADroneFPCharacter::ADroneFPCharacter()
 	AutoPossessPlayer = EAutoReceiveInput::Player0;
 }
 
-
 void ADroneFPCharacter::BeginPlay()
 {
 	Super::BeginPlay();
@@ -118,6 +119,7 @@ void ADroneFPCharacter::BeginPlay()
 #if PLATFORM_WINDOWS
 	FDjiHidReader::Get().Start();
 #endif
+
 	UE_LOG(LogTemp, Warning, TEXT("ADroneFPCharacter::BeginPlay (%s)"),
 		IsLocallyControlled() ? TEXT("Local") : TEXT("Remote"));
 
@@ -228,16 +230,14 @@ void ADroneFPCharacter::ApplyMappingContext()
 		}
 	}
 }
+
 void ADroneFPCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
 
-
 	UE_LOG(LogTemp, Warning, TEXT("ADroneFPCharacter::SetupPlayerInputComponent called"));
 	if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
-
-
 		if (IA_Throttle)
 		{
 			EIC->BindAction(IA_Throttle, ETriggerEvent::Triggered,
@@ -261,13 +261,13 @@ void ADroneFPCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EIC->BindAction(IA_Roll, ETriggerEvent::Triggered,
 				this, &ADroneFPCharacter::Roll);
 		}
-
 	}
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("PlayerInputComponent is NOT an EnhancedInputComponent!"));
 	}
 }
+
 void ADroneFPCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -277,25 +277,80 @@ void ADroneFPCharacter::Tick(float DeltaTime)
 		return;
 	}
 
-
 #if PLATFORM_WINDOWS
+	// Get latest channels from the DJI HID reader
 	const FDjiChannels Dji = FDjiHidReader::Get().GetChannels();
 
-	if (FMath::Abs(Dji.Roll) > 0.02f ||
-		FMath::Abs(Dji.Pitch) > 0.02f ||
-		FMath::Abs(Dji.Yaw) > 0.02f ||
-		Dji.Throttle > 0.02f)
+	// Simple deadzone helper
+	auto Deadzone = [](float v, float dz = 0.05f)
+		{
+			return (FMath::Abs(v) < dz) ? 0.f : v;
+		};
+
+	// Our FDjiChannels struct exposes per-stick axes:
+	//   LeftX01, LeftY01, RightX01, RightY01  (normalized)
+	//
+	// We’ll treat them as:
+	//   Left stick Y -> throttle & arming
+	//   Left stick X -> yaw
+	//   Right stick X -> roll
+	//   Right stick Y -> pitch
+
+	const float LeftYRaw = Dji.LeftY01;   // LEFT stick Y
+	const float RightXRaw = Dji.RightX01;  // RIGHT stick X
+	const float RightYRaw = Dji.RightY01;  // RIGHT stick Y
+	const float LeftX01 = Dji.LeftX01;   // LEFT stick X ([0..1] as we assume here)
+
+	// Convert LeftX01 [0..1] to symmetric [-1..1] for yaw deadzone
+	const float LeftXRaw = (LeftX01 * 2.f) - 1.f;
+
+	// ============================
+	// 1) Auto-arm from LEFT stick Y
+	// ============================
+	if (!bThrottleArmed && LeftYRaw <= -0.95f)
 	{
-		RollInput = Dji.Roll;
-		PitchInput = Dji.Pitch;
-		YawInput = Dji.Yaw;
-		Throttle01 = Dji.Throttle;
+		bThrottleArmed = true;
+		ThrottleSmoothed = 0.f;
+		Throttle01 = 0.f;
 
 		UE_LOG(LogTemp, Warning,
-			TEXT("DJI: Roll=%.3f Pitch=%.3f Yaw=%.3f Throttle=%.3f"),
-			Dji.Roll, Dji.Pitch, Dji.Yaw, Dji.Throttle);
+			TEXT("DJI: Throttle armed via left stick down (Ly=%.3f)"),
+			LeftYRaw);
+	}
+
+	// ============================
+	// 2) Map to DJI Mode 2
+	// ============================
+
+	// Right stick X -> Roll
+	RollInput = Deadzone(RightXRaw);
+
+	// Right stick Y -> Pitch (forward stick = nose DOWN)
+	PitchInput = Deadzone(-RightYRaw);
+
+	// Left stick X -> Yaw
+	YawInput = Deadzone(LeftXRaw);
+
+	// Left stick Y (-1..+1) -> Throttle01 (0..1)
+	const float LyClamped = FMath::Clamp(LeftYRaw, -1.f, 1.f);
+	Throttle01 = FMath::Clamp((LyClamped + 1.f) * 0.5f, 0.f, 1.f);
+
+	// ============================
+	// 3) Debug logging
+	// ============================
+	if (FMath::Abs(LeftXRaw) > 0.01f ||
+		FMath::Abs(LeftYRaw) > 0.01f ||
+		FMath::Abs(RightXRaw) > 0.01f ||
+		FMath::Abs(RightYRaw) > 0.01f)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("DJI STICKS | Lx=%.3f Ly=%.3f Rx=%.3f Ry=%.3f | DroneIn: Roll=%.3f Pitch=%.3f Yaw=%.3f Thr01=%.3f Armed=%d"),
+			LeftXRaw, LeftYRaw, RightXRaw, RightYRaw,
+			RollInput, PitchInput, YawInput, Throttle01,
+			bThrottleArmed ? 1 : 0);
 	}
 #endif
+
 	// Prevent PIE hitches from causing huge impulses
 	DeltaTime = FMath::Min(DeltaTime, 1.f / 30.f);
 
@@ -317,6 +372,7 @@ void ADroneFPCharacter::Tick(float DeltaTime)
 	// 4) Integrate movement and handle collisions
 	IntegrateMovement(DeltaTime, Accel);
 }
+
 void ADroneFPCharacter::UpdateCameraTilt()
 {
 	if (IsLocallyControlled() && CameraTiltPivot)
@@ -325,6 +381,7 @@ void ADroneFPCharacter::UpdateCameraTilt()
 		CameraTiltPivot->SetRelativeRotation(FRotator(CameraTiltDegrees, 0.f, 0.f));
 	}
 }
+
 void ADroneFPCharacter::SmoothInputs(
 	float DeltaTime,
 	float& OutPitchCmd,
@@ -382,6 +439,7 @@ void ADroneFPCharacter::VelocityDebugPrint()
 		);
 	}
 }
+
 void ADroneFPCharacter::UpdateOrientation(
 	float DeltaTime,
 	float PitchCmd,
@@ -395,8 +453,6 @@ void ADroneFPCharacter::UpdateOrientation(
 
 	AddActorLocalRotation(FRotator(dPitch, dYaw, dRoll), false);
 }
-
-
 
 FVector ADroneFPCharacter::ComputeTotalAcceleration(float DeltaTime)
 {
@@ -434,7 +490,7 @@ void ADroneFPCharacter::IntegrateMovement(float DeltaTime, const FVector& Accel)
 	// Integrate position
 	const FVector Delta = Velocity * DeltaTime;
 
-	//print velocity for debug
+	// print velocity for debug
 	VelocityDebugPrint();
 
 	FHitResult Hit;
@@ -495,7 +551,6 @@ void ADroneFPCharacter::HandleImpactDamage(const FHitResult& Hit)
 
 	if (ImpactSpeedCm <= KINDA_SMALL_NUMBER)
 	{
-
 		// Always log (so we can see why Damage might be 0)
 		UE_LOG(LogTemp, Warning,
 			TEXT("IMPACT DEBUG Grazing | Mass= %.3f | Normal=%s | Vel=%s | Vn=%.3f | ImpactSpeed=%.3f cm/s (%.8f m/s) | Energy=%.6f | Hardness=%.3f "),
@@ -513,9 +568,6 @@ void ADroneFPCharacter::HandleImpactDamage(const FHitResult& Hit)
 			TEXT("Grazing Impact"));
 		return; // grazing / sliding, no real impact
 	}
-
-
-
 
 	// Map energy range to 0..1 damage factor
 	const float Damage01 = FMath::GetMappedRangeValueClamped(
@@ -551,6 +603,7 @@ void ADroneFPCharacter::HandleImpactDamage(const FHitResult& Hit)
 			ImpactSpeedCm, ImpactSpeedM, ImpactEnergy, Hardness, Damage, Health, MaxHealth);
 	}
 }
+
 void DebugHit(const FHitResult& Hit)
 {
 	UE_LOG(LogTemp, Warning,
@@ -563,6 +616,7 @@ void DebugHit(const FHitResult& Hit)
 		*Hit.ImpactNormal.ToString()
 	);
 }
+
 FVector ADroneFPCharacter::ComputeThrustAccel(float DeltaTime)
 {
 	// 1) Smooth throttle (unchanged)
@@ -620,7 +674,7 @@ FVector ADroneFPCharacter::ComputeThrustAccel(float DeltaTime)
 	const float NetZ = UpAccel + GravityZ;          // thrust + gravity
 	// Read current vertical velocity (if you track it):
 	float VelocityZ = 0.f;
-	if (Velocity.IsNearlyZero() == false)    // assuming you have a Velocity member
+	if (Velocity.IsNearlyZero() == false)
 	{
 		VelocityZ = Velocity.Z;
 	}
@@ -651,7 +705,7 @@ float ADroneFPCharacter::GetSurfaceHardness(const FHitResult& Hit) const
 	{
 		EPhysicalSurface SurfaceType = UPhysicalMaterial::DetermineSurfaceType(PhysMat);
 
-		//You can customize these in Project Settings -> Physics -> Physical Surfaces
+		// You can customize these in Project Settings -> Physics -> Physical Surfaces
 		switch (SurfaceType)
 		{
 		case SurfaceType1: // FleshDefault
@@ -731,8 +785,6 @@ void ADroneFPCharacter::Throttle(const FInputActionValue& Value)
 		Raw, Throttle01, bThrottleArmed ? 1 : 0);
 }
 
-
-
 void ADroneFPCharacter::Yaw(const FInputActionValue& Value)
 {
 	YawInput = Value.Get<float>();
@@ -750,6 +802,7 @@ void ADroneFPCharacter::Roll(const FInputActionValue& Value)
 	RollInput = Value.Get<float>();
 	UE_LOG(LogTemp, Warning, TEXT("RollInput = %.3f"), RollInput);
 }
+
 static float Deadzone1D(float v, float dz = 0.1f)
 {
 	return (FMath::Abs(v) < dz) ? 0.f : v;
@@ -795,6 +848,7 @@ void ADroneFPCharacter::Look(const FInputActionValue& Value)
 			FString::Printf(TEXT("Look: X=%.2f Y=%.2f"), X, Y));
 	}
 }
+
 void ADroneFPCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 #if PLATFORM_WINDOWS
