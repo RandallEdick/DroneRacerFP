@@ -24,6 +24,15 @@ FCriticalSection          FDjiHidReader::InstanceMutex;
 // ============================================================================
 // Singleton
 // ============================================================================
+static FString HexDump(const uint8* Data, int32 Len)
+{
+	FString S;
+	for (int32 i = 0; i < Len; ++i)
+	{
+		S += FString::Printf(TEXT("%02X "), Data[i]);
+	}
+	return S;
+}
 
 FDjiHidReader& FDjiHidReader::Get()
 {
@@ -213,7 +222,7 @@ uint32 FDjiHidReader::Run()
 				const DWORD WaitRes = WaitForMultipleObjects(
 					HandleCount,
 					WaitHandles,
-					false,      // bWaitAll = false (use 'false', not FALSE macro)
+					false,      // bWaitAll = false
 					INFINITE
 				);
 
@@ -223,16 +232,35 @@ uint32 FDjiHidReader::Run()
 					if (!GetOverlappedResult(Handle, &Overlapped, &BytesRead, false))
 					{
 						const DWORD ResErr = GetLastError();
-						UE_LOG(LogDjiHid, Warning, TEXT("DJI: GetOverlappedResult failed. Err=%d"), ResErr);
+						UE_LOG(LogDjiHid, Warning,
+							TEXT("DJI: GetOverlappedResult failed. Err=%d"),
+							ResErr);
 
 						CloseHandle(Overlapped.hEvent);
 
-						if (ResErr == ERROR_DEVICE_NOT_CONNECTED || ResErr == ERROR_GEN_FAILURE)
+						// Hard disconnect: bail out
+						if (ResErr == ERROR_DEVICE_NOT_CONNECTED)
 						{
-							UE_LOG(LogDjiHid, Warning, TEXT("DJI: Device disconnected during overlapped read (Err=%d). Exiting read loop."), ResErr);
+							UE_LOG(LogDjiHid, Warning,
+								TEXT("DJI: Device disconnected during overlapped read (Err=%d). Exiting read loop."),
+								ResErr);
 							break;
 						}
 
+						// Generic failure (e.g. ERR=31): log and keep trying
+						if (ResErr == ERROR_GEN_FAILURE)
+						{
+							UE_LOG(LogDjiHid, Warning,
+								TEXT("DJI: Generic failure during overlapped read (Err=%d). Continuing."),
+								ResErr);
+							if (bStopRequested)
+							{
+								break;
+							}
+							continue;
+						}
+
+						// Other errors: log and continue unless we're stopping
 						if (bStopRequested)
 						{
 							break;
@@ -251,24 +279,46 @@ uint32 FDjiHidReader::Run()
 				else
 				{
 					// Unexpected wait result
-					UE_LOG(LogDjiHid, Warning, TEXT("DJI: WaitForMultipleObjects returned 0x%08X"), WaitRes);
+					UE_LOG(LogDjiHid, Warning,
+						TEXT("DJI: WaitForMultipleObjects returned 0x%08X"),
+						WaitRes);
 					CancelIoEx(Handle, &Overlapped);
 					CloseHandle(Overlapped.hEvent);
 					break;
 				}
 			}
-			else if (Err == ERROR_DEVICE_NOT_CONNECTED || Err == ERROR_GEN_FAILURE)
-			{
-				// ERR=31 (ERROR_GEN_FAILURE) or device not connected => treat as graceful disconnect
-				UE_LOG(LogDjiHid, Warning, TEXT("DJI: Device disconnected or generic failure (Err=%d). Exiting read loop."), Err);
-				CloseHandle(Overlapped.hEvent);
-				break;
-			}
 			else
 			{
-				UE_LOG(LogDjiHid, Warning, TEXT("DJI: ReadFile failed immediately. Err=%d"), Err);
+				// Non-overlapped error path
+				UE_LOG(LogDjiHid, Warning,
+					TEXT("DJI: ReadFile failed immediately. Err=%d"),
+					Err);
+
 				CloseHandle(Overlapped.hEvent);
 
+				// Hard disconnect → exit
+				if (Err == ERROR_DEVICE_NOT_CONNECTED)
+				{
+					UE_LOG(LogDjiHid, Warning,
+						TEXT("DJI: Device not connected (Err=%d). Exiting read loop."),
+						Err);
+					break;
+				}
+
+				// Generic failure (31) → log and keep trying
+				if (Err == ERROR_GEN_FAILURE)
+				{
+					UE_LOG(LogDjiHid, Warning,
+						TEXT("DJI: Generic failure (Err=%d). Keeping read loop alive."),
+						Err);
+					if (bStopRequested)
+					{
+						break;
+					}
+					continue;
+				}
+
+				// Other errors: log and continue unless we’re stopping
 				if (bStopRequested)
 				{
 					break;
@@ -290,27 +340,55 @@ uint32 FDjiHidReader::Run()
 			TArray<uint8> Copy;
 			Copy.Append(Buffer.GetData(), BytesRead);
 
-			// Broadcast to any listeners
+			// Debug: dump raw packet (you can change Warning -> Verbose later)
+			UE_LOG(LogDjiHid, Warning,
+				TEXT("DJI: Report (%d bytes): %s"),
+				BytesRead,
+				*HexDump(Copy.GetData(), Copy.Num()));
+
+			// Broadcast to any listeners (if anyone else is bound)
 			OnInputReport.Broadcast(Copy);
 
-			// ------------------ UPDATE CHANNELS HERE ------------------
+			// ------------------ BYTE-ALIGNED DJI MAPPING ------------------
 			{
 				FScopeLock Lock(&ChannelsMutex);
 
-				// TODO: Replace this with your actual DJI parsing logic.
-				// For now this just zeroes them each read so it compiles and runs.
-				Channels.LeftXRaw = 0;
-				Channels.LeftYRaw = 0;
-				Channels.RightXRaw = 0;
-				Channels.RightYRaw = 0;
-				Channels.LeftX01 = 0.f;
-				Channels.LeftY01 = 0.f;
-				Channels.RightX01 = 0.f;
-				Channels.RightY01 = 0.f;
-				Channels.Throttle01 = 0.f;
+				if (Copy.Num() >= 13)
+				{
+					// Based on A4 flickering, your stick data actually starts 
+					// later in the packet than the standard DJI documentation suggests.
+					// We will skip the first 3 bytes (Header) and start at Byte 4.
+
+					uint16 RawCh1 = ((uint16)Copy[3] | ((uint16)Copy[4] << 8)) & 0x07FF;
+					uint16 RawCh2 = (((uint16)Copy[4] >> 3) | ((uint16)Copy[5] << 5)) & 0x07FF;
+					uint16 RawCh3 = (((uint16)Copy[5] >> 6) | ((uint16)Copy[6] << 2) | ((uint16)Copy[7] << 10)) & 0x07FF;
+					uint16 RawCh4 = (((uint16)Copy[7] >> 1) | ((uint16)Copy[8] << 7)) & 0x07FF;
+
+					auto NormalizeDji = [](uint16 Raw) -> float {
+						// DJI Standard: 1024 is center. Range 364 to 1684.
+						float Val = (static_cast<float>(Raw) - 1024.f) / 660.f;
+						if (FMath::Abs(Val) < 0.05f) Val = 0.0f; // Deadzone
+						return FMath::Clamp(Val, -1.0f, 1.0f);
+						};
+
+					// If A4 was the one moving, RawCh4 is likely your Throttle or Yaw.
+					float Val4 = NormalizeDji(RawCh4);
+
+					// Let's test this specific mapping:
+					Channels.LeftY01 = Val4;
+					Channels.Throttle01 = (Val4 + 1.0f) * 0.5f;
+
+					static int32 LogTick = 0;
+					if (++LogTick % 20 == 0)
+					{
+						UE_LOG(LogDjiHid, Warning, TEXT("REALIGN -> T: %.2f | Raw4: %u | A4: %u"),
+							Channels.Throttle01, RawCh4, ((uint16)Copy[7] | ((uint16)Copy[8] << 8)));
+					}
+				}
 			}
-			// ----------------------------------------------------------
+
 		}
+
 	}
 
 	UE_LOG(LogDjiHid, Warning, TEXT("DJI: Run loop exiting"));
@@ -347,6 +425,19 @@ bool FDjiHidReader::OpenDevice()
 		return true; // already open
 	}
 
+	// If no path has been set explicitly, try to auto-discover the DJI controller.
+	if (DevicePath.IsEmpty())
+	{
+		FString FoundPath;
+		if (!DiscoverDjiDevicePath(FoundPath))
+		{
+			UE_LOG(LogDjiHid, Error, TEXT("DJI: DevicePath is empty and auto-discovery failed."));
+			return false;
+		}
+
+		DevicePath = FoundPath;
+	}
+
 	const FString& Path = DevicePath;
 	if (Path.IsEmpty())
 	{
@@ -379,6 +470,114 @@ bool FDjiHidReader::OpenDevice()
 	// (Optional) Query HID capabilities here and adjust InputReportLen
 
 	return true;
+}
+bool FDjiHidReader::DiscoverDjiDevicePath(FString& OutPath)
+{
+	OutPath.Empty();
+
+	// HID class GUID
+	GUID HidGuid;
+	HidD_GetHidGuid(&HidGuid);
+
+	// Get a handle to all HID-class devices present
+	HDEVINFO DeviceInfoSet = SetupDiGetClassDevs(
+		&HidGuid,
+		nullptr,
+		nullptr,
+		DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
+	);
+
+	if (DeviceInfoSet == INVALID_HANDLE_VALUE)
+	{
+		UE_LOG(LogDjiHid, Error, TEXT("DJI: SetupDiGetClassDevs failed. GetLastError=%d"), GetLastError());
+		return false;
+	}
+
+	SP_DEVICE_INTERFACE_DATA InterfaceData;
+	FMemory::Memzero(InterfaceData);
+	InterfaceData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+
+	// We’ll look for VID_2CA3 & PID_1020 in the device path
+	const FString TargetVidPid = TEXT("vid_2ca3&pid_1020");
+
+	bool bFound = false;
+
+	for (DWORD Index = 0; ; ++Index)
+	{
+		if (!SetupDiEnumDeviceInterfaces(
+			DeviceInfoSet,
+			nullptr,
+			&HidGuid,
+			Index,
+			&InterfaceData))
+		{
+			const DWORD Err = GetLastError();
+			if (Err != ERROR_NO_MORE_ITEMS)
+			{
+				UE_LOG(LogDjiHid, Warning,
+					TEXT("DJI: SetupDiEnumDeviceInterfaces stopped with error %d at index %d"),
+					Err, Index);
+			}
+			break; // done enumerating
+		}
+
+		// First call: get required buffer size
+		DWORD RequiredSize = 0;
+		SetupDiGetDeviceInterfaceDetail(
+			DeviceInfoSet,
+			&InterfaceData,
+			nullptr,
+			0,
+			&RequiredSize,
+			nullptr);
+
+		if (RequiredSize == 0)
+		{
+			continue;
+		}
+
+		TArray<uint8> DetailDataBuffer;
+		DetailDataBuffer.SetNumUninitialized(RequiredSize);
+
+		auto* DetailData = reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA>(DetailDataBuffer.GetData());
+		DetailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+
+		if (!SetupDiGetDeviceInterfaceDetail(
+			DeviceInfoSet,
+			&InterfaceData,
+			DetailData,
+			RequiredSize,
+			nullptr,
+			nullptr))
+		{
+			UE_LOG(LogDjiHid, Warning,
+				TEXT("DJI: SetupDiGetDeviceInterfaceDetail failed. Err=%d"),
+				GetLastError());
+			continue;
+		}
+
+		// DetailData->DevicePath is a NULL-terminated wide string
+		const FString ThisPath(DetailData->DevicePath);
+
+		FString LowerPath = ThisPath.ToLower();
+
+		if (LowerPath.Contains(TargetVidPid))
+		{
+			UE_LOG(LogDjiHid, Warning, TEXT("DJI: Auto-discovered DJI HID path: %s"), *ThisPath);
+			OutPath = ThisPath;
+			bFound = true;
+			break; // pick first match
+		}
+	}
+
+	SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+
+	if (!bFound)
+	{
+		UE_LOG(LogDjiHid, Error, TEXT("DJI: Could not find any HID device matching %s"), *TargetVidPid);
+	}
+
+	return bFound;
 }
 
 void FDjiHidReader::CloseWindowsHandles()

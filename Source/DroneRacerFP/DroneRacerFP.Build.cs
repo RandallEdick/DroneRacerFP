@@ -16,7 +16,8 @@ public class DroneRacerFP : ModuleRules
                 "Engine",
                 "InputCore",
                 "EnhancedInput",
-                "PhysicsCore"
+                "PhysicsCore",
+                "UMG"
             }
         );
 

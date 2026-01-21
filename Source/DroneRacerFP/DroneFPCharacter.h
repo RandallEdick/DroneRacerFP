@@ -5,6 +5,7 @@
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "ControllerAxisAggregatorComponent.h"
 #include "DroneFPCharacter.generated.h"
 
 class UCameraComponent;
@@ -180,6 +181,8 @@ protected:
     /** Roll rate (deg/s) at full stick */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Flight|Physics")
     float RollRateDeg = 360.0f;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+    UControllerAxisAggregatorComponent* AxisAgg;
 
     /** Yaw rate (deg/s) at full stick */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Flight|Physics")

@@ -89,5 +89,7 @@ private:
 
 	bool OpenDevice();
 	void CloseWindowsHandles();
+	/** Attempt to find a DJI HID device (VID_2CA3, PID_1020) and output its path. */
+	bool DiscoverDjiDevicePath(FString& OutPath);
 #endif
 };

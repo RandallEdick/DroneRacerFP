@@ -22,6 +22,19 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input)
 	UInputMappingContext* InputMappingContext;
 
+	// YourPlayerController.h
+
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<class UDroneControllerCalibrationWidget> CalibrationWidgetClass;
+
+	UPROPERTY()
+	UDroneControllerCalibrationWidget* CalibrationWidget = nullptr;
+
+	UFUNCTION(BlueprintCallable, Category = "Calibration")
+	void ShowControllerCalibration();
+
+
+
 	// Begin Actor interface
 protected:
 

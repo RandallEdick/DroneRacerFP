@@ -31,17 +31,22 @@ static float ApplyFpvRates(
 	// 1) Expo (cubic blend)
 	float x = (1.f - expo) * stick + expo * stick * stick * stick;
 
-	// 2) RC Rate (linear scaling)
-	float rate = x * rcRate;
+	return x;
 
-	// 3) SuperRate (end-stick boost)
-	const float absRate = FMath::Abs(rate);
-	if (absRate > KINDA_SMALL_NUMBER)
-	{
-		rate = rate * (1.f + superRate * absRate / (1.f - absRate));
-	}
+	//// 2) RC Rate (linear scaling)
+	//float rate = x * rcRate;
 
-	return rate; // still normalized (-∞..∞), scaled later
+	//// 3) SuperRate (end-stick boost)
+	//const float absRate = FMath::Abs(rate);
+	//// Clamp absRate to slightly less than 1.0 to prevent division by zero
+	//const float ClampedAbsRate = FMath::Min(absRate, 0.99f);
+
+	//if (ClampedAbsRate > KINDA_SMALL_NUMBER)
+	//{
+	//	// Use the clamped version here
+	//	rate = rate * (1.f + superRate * ClampedAbsRate / (1.f - ClampedAbsRate));
+	//}
+	//return rate; // still normalized (-∞..∞), scaled later
 }
 
 static float ApplyCubicExpo(float x, float expo)
@@ -71,6 +76,8 @@ ADroneFPCharacter::ADroneFPCharacter()
 			}
 		}
 	}
+	//controller aggregator
+	AxisAgg = CreateDefaultSubobject<UControllerAxisAggregatorComponent>(TEXT("AxisAgg"));
 
 	// Resize the collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(12.0f, 7.0f);
@@ -271,96 +278,46 @@ void ADroneFPCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 void ADroneFPCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+	if (GEngine)
+	{
+		// 1. Get the Player Controller
+		APlayerController* PC = Cast<APlayerController>(GetController());
+		if (PC)
+		{
+			// 2. Scan GenericUSBController Axes 1 through 8
+			for (int32 i = 1; i <= 8; i++)
+			{
+				FKey AxisKey = FKey(FName(*FString::Printf(TEXT("GenericUSBController_Axis%d"), i)));
+				float AxisValue = PC->GetInputAnalogKeyState(AxisKey);
 
+				// 3. Only display if the value is not zero (to clear the clutter)
+				if (FMath::Abs(AxisValue) > 0.01f)
+				{
+					// Use Key '10 + i' to ensure each axis gets its own line (Line 11, 12, etc.)
+					GEngine->AddOnScreenDebugMessage(10 + i, 0.1f, FColor::Orange,
+						FString::Printf(TEXT("DETECTED - Axis %d: %.3f"), i, AxisValue));
+				}
+			}
+		}
+	}
 	if (DeltaTime <= 0.f)
 	{
 		return;
 	}
 
-#if PLATFORM_WINDOWS
-	// Get latest channels from the DJI HID reader
-	const FDjiChannels Dji = FDjiHidReader::Get().GetChannels();
 
-	// Simple deadzone helper
-	auto Deadzone = [](float v, float dz = 0.05f)
-		{
-			return (FMath::Abs(v) < dz) ? 0.f : v;
-		};
 
-	// Our FDjiChannels struct exposes per-stick axes:
-	//   LeftX01, LeftY01, RightX01, RightY01  (normalized)
-	//
-	// We’ll treat them as:
-	//   Left stick Y -> throttle & arming
-	//   Left stick X -> yaw
-	//   Right stick X -> roll
-	//   Right stick Y -> pitch
-
-	const float LeftYRaw = Dji.LeftY01;   // LEFT stick Y
-	const float RightXRaw = Dji.RightX01;  // RIGHT stick X
-	const float RightYRaw = Dji.RightY01;  // RIGHT stick Y
-	const float LeftX01 = Dji.LeftX01;   // LEFT stick X ([0..1] as we assume here)
-
-	// Convert LeftX01 [0..1] to symmetric [-1..1] for yaw deadzone
-	const float LeftXRaw = (LeftX01 * 2.f) - 1.f;
-
-	// ============================
-	// 1) Auto-arm from LEFT stick Y
-	// ============================
-	if (!bThrottleArmed && LeftYRaw <= -0.95f)
-	{
-		bThrottleArmed = true;
-		ThrottleSmoothed = 0.f;
-		Throttle01 = 0.f;
-
-		UE_LOG(LogTemp, Warning,
-			TEXT("DJI: Throttle armed via left stick down (Ly=%.3f)"),
-			LeftYRaw);
-	}
-
-	// ============================
-	// 2) Map to DJI Mode 2
-	// ============================
-
-	// Right stick X -> Roll
-	RollInput = Deadzone(RightXRaw);
-
-	// Right stick Y -> Pitch (forward stick = nose DOWN)
-	PitchInput = Deadzone(-RightYRaw);
-
-	// Left stick X -> Yaw
-	YawInput = Deadzone(LeftXRaw);
-
-	// Left stick Y (-1..+1) -> Throttle01 (0..1)
-	const float LyClamped = FMath::Clamp(LeftYRaw, -1.f, 1.f);
-	Throttle01 = FMath::Clamp((LyClamped + 1.f) * 0.5f, 0.f, 1.f);
-
-	// ============================
-	// 3) Debug logging
-	// ============================
-	if (FMath::Abs(LeftXRaw) > 0.01f ||
-		FMath::Abs(LeftYRaw) > 0.01f ||
-		FMath::Abs(RightXRaw) > 0.01f ||
-		FMath::Abs(RightYRaw) > 0.01f)
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("DJI STICKS | Lx=%.3f Ly=%.3f Rx=%.3f Ry=%.3f | DroneIn: Roll=%.3f Pitch=%.3f Yaw=%.3f Thr01=%.3f Armed=%d"),
-			LeftXRaw, LeftYRaw, RightXRaw, RightYRaw,
-			RollInput, PitchInput, YawInput, Throttle01,
-			bThrottleArmed ? 1 : 0);
-	}
-#endif
-
-	// Prevent PIE hitches from causing huge impulses
-	DeltaTime = FMath::Min(DeltaTime, 1.f / 30.f);
-
-	// A) Camera tilt
+// A) Camera tilt
 	UpdateCameraTilt();
 
-	// 0) Smooth inputs and compute stick commands
+	// 0) Process commands
 	float PitchCmd = 0.f;
 	float RollCmd = 0.f;
 	float YawCmd = 0.f;
+
+	// IMPORTANT: Check your SmoothInputs function. 
+	// It should be using the member variables (PitchInput, etc.) 
+	// that your Enhanced Input functions are now updating.
 	SmoothInputs(DeltaTime, PitchCmd, RollCmd, YawCmd);
 
 	// 1) Update orientation
@@ -489,9 +446,6 @@ void ADroneFPCharacter::IntegrateMovement(float DeltaTime, const FVector& Accel)
 
 	// Integrate position
 	const FVector Delta = Velocity * DeltaTime;
-
-	// print velocity for debug
-	VelocityDebugPrint();
 
 	FHitResult Hit;
 	AddActorWorldOffset(Delta, /*bSweep=*/true, &Hit);
@@ -760,47 +714,76 @@ void ADroneFPCharacter::OnDroneDestroyed()
 
 void ADroneFPCharacter::Throttle(const FInputActionValue& Value)
 {
-	const float Raw = Value.Get<float>(); // -1..+1
+	float RawValue = Value.Get<float>();
 
-	// Arm only when stick is near bottom (-1)
-	constexpr float ArmThresholdRaw = -0.95f; // tune
-	if (!bThrottleArmed && Raw <= ArmThresholdRaw)
+	// Arming logic: Requires stick at bottom (-.05) to start motors
+	if (!bThrottleArmed && RawValue <= -0.05)
 	{
 		bThrottleArmed = true;
-		UE_LOG(LogTemp, Warning, TEXT("Throttle armed! Raw=%.3f"), Raw);
+		UE_LOG(LogTemp, Warning, TEXT("Drone Armed via Enhanced Input!"));
 	}
-
-	float R = Raw;
-
-	// Deadzone around center only (doesn't affect arming at -1)
-	if (FMath::Abs(R) < 0.1f)
+	bThrottleArmed = true;
+	if (bThrottleArmed)
 	{
-		R = 0.f;
+		float RawInput = Value.Get<float>();
+
+		// This takes your input (which is now roughly 0.0 to 1.0 thanks to the Scalar)
+		// and forces it to stay strictly within 0.0 and 1.0
+		ThrottleInput = FMath::Clamp(RawInput, 0.0f, 1.0f);
+
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(1, 0.1f, FColor::Yellow,
+				FString::Printf(TEXT("Throttle: %.3f"), ThrottleInput));
+		}
 	}
-
-	// Map -1..+1 -> 0..1
-	Throttle01 = FMath::Clamp((R + 1.f) * 0.5f, 0.f, 1.f);
-
-	UE_LOG(LogTemp, Warning, TEXT("Raw=%.3f  Throttle01=%.3f  Armed=%d"),
-		Raw, Throttle01, bThrottleArmed ? 1 : 0);
 }
 
 void ADroneFPCharacter::Yaw(const FInputActionValue& Value)
 {
 	YawInput = Value.Get<float>();
 	UE_LOG(LogTemp, Warning, TEXT("YawInput = %.3f"), YawInput);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			2,                 // A unique Key (use -1 to stack messages, or a fixed number to overwrite)
+			0.1f,              // Time to display (keep short for real-time values)
+			FColor::Green,      // Text Color
+			FString::Printf(TEXT("Yaw Input: %.3f"), YawInput) // The formatted float
+		);
+	}
 }
 
 void ADroneFPCharacter::Pitch(const FInputActionValue& Value)
 {
-	PitchInput = Value.Get<float>();
+	// Standard Sim: Forward stick = Nose Down. 
+	// If your IMC doesn't have a 'Negate' modifier, do it here:
+	PitchInput = -Value.Get<float>();
 	UE_LOG(LogTemp, Warning, TEXT("PitchInput = %.3f"), PitchInput);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			3,                 // A unique Key (use -1 to stack messages, or a fixed number to overwrite)
+			0.1f,              // Time to display (keep short for real-time values)
+			FColor::Cyan,      // Text Color
+			FString::Printf(TEXT("Pitch Input: %.3f"), PitchInput) // The formatted float
+		);
+	}
 }
 
 void ADroneFPCharacter::Roll(const FInputActionValue& Value)
 {
 	RollInput = Value.Get<float>();
 	UE_LOG(LogTemp, Warning, TEXT("RollInput = %.3f"), RollInput);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			4,                 // A unique Key (use -1 to stack messages, or a fixed number to overwrite)
+			0.1f,              // Time to display (keep short for real-time values)
+			FColor::Magenta,      // Text Color
+			FString::Printf(TEXT("Roll Input: %.3f"), RollInput) // The formatted float
+		);
+	}
 }
 
 static float Deadzone1D(float v, float dz = 0.1f)
