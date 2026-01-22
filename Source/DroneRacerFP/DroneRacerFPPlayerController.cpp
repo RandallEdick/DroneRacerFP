@@ -2,21 +2,61 @@
 
 
 #include "DroneRacerFPPlayerController.h"
+
+#include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
+#include "InputActionValue.h"
+
 #include "DroneControllerCalibrationWidget.h"
 #include "Kismet/GameplayStatics.h"
-#include "EnhancedInputSubsystems.h"
-#include "Engine/LocalPlayer.h"
 
 void ADroneRacerFPPlayerController::BeginPlay()
 {
-	Super::BeginPlay();
+    Super::BeginPlay();
 
-	// get the enhanced input subsystem
-	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
-	{
-		// add the mapping context so we get controls
-		Subsystem->AddMappingContext(InputMappingContext, 0);
-	}
+    // Add mapping context
+    if (IMC_Default)
+    {
+        if (ULocalPlayer* LP = GetLocalPlayer())
+        {
+            if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
+                LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
+            {
+                Subsystem->AddMappingContext(IMC_Default, 0);
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("IMC_Default not set on PlayerController"));
+    }
+}
+void ADroneRacerFPPlayerController::SetupInputComponent()
+{
+    Super::SetupInputComponent();
+
+    UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(InputComponent);
+    if (!EIC)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("InputComponent is not EnhancedInputComponent"));
+        return;
+    }
+
+    if (!IA_StartCalibration)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("IA_StartCalibration not set on PlayerController"));
+        return;
+    }
+
+    EIC->BindAction(IA_StartCalibration, ETriggerEvent::Started, this,
+        &ADroneRacerFPPlayerController::OnStartCalibration);
+}
+
+
+void ADroneRacerFPPlayerController::OnStartCalibration(const FInputActionValue& Value)
+{
+    UE_LOG(LogTemp, Log, TEXT("EnhancedInput: Start Calibration"));
+    ShowControllerCalibration();
 }
 
 

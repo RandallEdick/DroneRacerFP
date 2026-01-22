@@ -102,6 +102,10 @@ void UControllerAxisAggregatorComponent::SetAxisValue(int32 Index0, float v)
         return;
     }
     Axes[Index0] = v;
+
+#if WITH_EDITOR
+    UE_LOG(LogTemp, Warning, TEXT("Axis %d = %.3f"), Index0, v);
+#endif
 }
 
 // Handlers

@@ -4,9 +4,12 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
+#include "InputActionValue.h"
 #include "DroneRacerFPPlayerController.generated.h"
 
+class UInputAction;
 class UInputMappingContext;
+class UDroneControllerCalibrationWidget;
 
 /**
  *
@@ -27,11 +30,23 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<class UDroneControllerCalibrationWidget> CalibrationWidgetClass;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	UInputAction* IA_StartCalibration;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	UInputMappingContext* IMC_Default;
+
 	UPROPERTY()
 	UDroneControllerCalibrationWidget* CalibrationWidget = nullptr;
 
+	UFUNCTION()
+	void OnStartCalibration(const FInputActionValue& Value);
+
 	UFUNCTION(BlueprintCallable, Category = "Calibration")
 	void ShowControllerCalibration();
+
+	void SetupInputComponent();
+
 
 
 
