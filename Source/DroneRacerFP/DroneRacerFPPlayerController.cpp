@@ -3,6 +3,8 @@
 
 #include "DroneRacerFPPlayerController.h"
 
+#include "InputAction.h"         
+#include "InputMappingContext.h"  
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
@@ -13,6 +15,13 @@
 void ADroneRacerFPPlayerController::BeginPlay()
 {
     Super::BeginPlay();
+
+    UE_LOG(LogTemp, Warning, TEXT("PC BeginPlay: %s (Class=%s)"),
+        *GetName(), *GetClass()->GetName());
+
+    UE_LOG(LogTemp, Warning, TEXT("IMC_Default=%s  IA_StartCalibration=%s"),
+        *GetNameSafe(IMC_Default),
+        *GetNameSafe(IA_StartCalibration));
 
     // Add mapping context
     if (IMC_Default)
@@ -35,23 +44,30 @@ void ADroneRacerFPPlayerController::SetupInputComponent()
 {
     Super::SetupInputComponent();
 
+    UE_LOG(LogTemp, Warning, TEXT("PC SetupInputComponent: %s"), *GetName());
+
     UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(InputComponent);
+    UE_LOG(LogTemp, Warning, TEXT("InputComponent=%s  Enhanced=%s"),
+        *GetNameSafe(InputComponent),
+        EIC ? TEXT("YES") : TEXT("NO"));
+
     if (!EIC)
     {
-        UE_LOG(LogTemp, Warning, TEXT("InputComponent is not EnhancedInputComponent"));
+        UE_LOG(LogTemp, Error, TEXT("EnhancedInputComponent missing - binding will not work"));
         return;
     }
 
     if (!IA_StartCalibration)
     {
-        UE_LOG(LogTemp, Warning, TEXT("IA_StartCalibration not set on PlayerController"));
+        UE_LOG(LogTemp, Error, TEXT("IA_StartCalibration is null - assign it in BP defaults"));
         return;
     }
 
     EIC->BindAction(IA_StartCalibration, ETriggerEvent::Started, this,
         &ADroneRacerFPPlayerController::OnStartCalibration);
-}
 
+    UE_LOG(LogTemp, Warning, TEXT("Bound IA_StartCalibration"));
+}
 
 void ADroneRacerFPPlayerController::OnStartCalibration(const FInputActionValue& Value)
 {
