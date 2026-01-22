@@ -224,6 +224,14 @@ protected:
     void ApplyDamageToDrone(float DamageAmount);
     void OnDroneDestroyed();
 
+protected:
+    virtual void PossessedBy(AController* NewController) override;
+    virtual void OnRep_Controller() override;
+
+private:
+    void TrySetupEnhancedInput();
+
+
 private:
     void ApplyMappingContext();
     float Throttle01=0.f;

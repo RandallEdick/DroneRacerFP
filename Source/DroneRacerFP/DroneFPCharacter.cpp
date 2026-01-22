@@ -139,10 +139,11 @@ void ADroneFPCharacter::BeginPlay()
 	}
 
 	// ---- Local-only setup (camera + input) ----
-	if (!IsLocallyControlled())
+	if (!GetController() || !GetController()->IsLocalController())
 	{
 		return;
 	}
+
 
 	// ----- Enhanced Input -----
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
@@ -839,4 +840,48 @@ void ADroneFPCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 #endif
 
 	Super::EndPlay(EndPlayReason);
+}
+void ADroneFPCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+	TrySetupEnhancedInput();
+}
+
+void ADroneFPCharacter::OnRep_Controller()
+{
+	Super::OnRep_Controller();
+	TrySetupEnhancedInput();
+}
+
+void ADroneFPCharacter::TrySetupEnhancedInput()
+{
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC || !PC->IsLocalController())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("TrySetupEnhancedInput: no local PC yet"));
+		return;
+	}
+
+	ULocalPlayer* LP = PC->GetLocalPlayer();
+	if (!LP)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("TrySetupEnhancedInput: no LocalPlayer"));
+		return;
+	}
+
+	UEnhancedInputLocalPlayerSubsystem* Subsys = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
+	if (!Subsys)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("TrySetupEnhancedInput: no EnhancedInput subsystem"));
+		return;
+	}
+
+	if (!IMC_Default)
+	{
+		UE_LOG(LogTemp, Error, TEXT("TrySetupEnhancedInput: IMC_Default is NULL"));
+		return;
+	}
+
+	Subsys->AddMappingContext(IMC_Default, 0);
+	UE_LOG(LogTemp, Warning, TEXT("TrySetupEnhancedInput: Added IMC_Default"));
 }
