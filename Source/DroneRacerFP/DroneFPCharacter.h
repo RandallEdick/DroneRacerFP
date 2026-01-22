@@ -6,6 +6,7 @@
 #include "InputMappingContext.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "ControllerAxisAggregatorComponent.h"
+#include "GenericHidInputComponent.h"
 #include "DroneFPCharacter.generated.h"
 
 class UCameraComponent;
@@ -100,7 +101,8 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight|Input")
     float ThrottleSmoothSpeed = 5.f; // how quickly we follow stick
 
-
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Input")
+    UGenericHidInputComponent* GenericHid;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight|Input")
     float RotSmoothSpeed = 8.f;
@@ -208,6 +210,7 @@ protected:
     float MinEnergyForDamage = 5.f;      // J-ish
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight|Health")
     float MaxEnergyForMaxDamage = 100.f; // J-ish
+
 
     // ===== Input handlers (Enhanced Input) =====
 

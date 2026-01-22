@@ -76,6 +76,10 @@ ADroneFPCharacter::ADroneFPCharacter()
 			}
 		}
 	}
+	GenericHid = CreateDefaultSubobject<UGenericHidInputComponent>(TEXT("GenericHid"));
+	GenericHid->bAutoStart = true;
+	GenericHid->bLogDevices = true;
+
 	//controller aggregator
 	AxisAgg = CreateDefaultSubobject<UControllerAxisAggregatorComponent>(TEXT("AxisAgg"));
 
