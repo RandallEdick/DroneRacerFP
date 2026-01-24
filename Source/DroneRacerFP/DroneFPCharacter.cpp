@@ -124,12 +124,15 @@ void ADroneFPCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	if (GenericHid)
+	{
+		GenericHid->OnAxesUpdated.AddDynamic(this, &ADroneFPCharacter::OnGenericHidAxesUpdated);
+		UE_LOG(LogTemp, Warning, TEXT("Bound GenericHID OnAxesUpdated"));
+	}
+
 	// Initialize health
 	Health = MaxHealth;
 
-#if PLATFORM_WINDOWS
-	FDjiHidReader::Get().Start();
-#endif
 
 	UE_LOG(LogTemp, Warning, TEXT("ADroneFPCharacter::BeginPlay (%s)"),
 		IsLocallyControlled() ? TEXT("Local") : TEXT("Remote"));
@@ -192,6 +195,17 @@ void ADroneFPCharacter::BeginPlay()
 		*CameraTiltPivot->GetRelativeRotation().ToString());
 	UE_LOG(LogTemp, Warning, TEXT("Camera WorldRot: %s"),
 		*FirstPersonCamera->GetComponentRotation().ToString());
+}
+void ADroneFPCharacter::OnGenericHidAxesUpdated(const FGenericHidDeviceAxes& Axes)
+{
+	// 0=X 1=Y 2=Z 3=Rx 4=Ry 5=Rz 6=Slider 7=Dial 8=Wheel
+	auto GetA = [&](int32 i) { return Axes.Axes.IsValidIndex(i) ? Axes.Axes[i] : 0.f; };
+
+	UE_LOG(LogTemp, Warning, TEXT("HID %s  X=%.3f Y=%.3f Z=%.3f Rx=%.3f Ry=%.3f Rz=%.3f Sl=%.3f"),
+		*Axes.DeviceId,
+		GetA(0), GetA(1), GetA(2),
+		GetA(3), GetA(4), GetA(5),
+		GetA(6));
 }
 
 void ADroneFPCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
@@ -273,10 +287,33 @@ void ADroneFPCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EIC->BindAction(IA_Roll, ETriggerEvent::Triggered,
 				this, &ADroneFPCharacter::Roll);
 		}
+
+		if(IA_StartCalibration)
+		{
+			EIC->BindAction(IA_StartCalibration, ETriggerEvent::Started,
+				this, &ADroneFPCharacter::OnToggleCalibration);
+		}
 	}
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("PlayerInputComponent is NOT an EnhancedInputComponent!"));
+	}
+}
+#include "EnhancedInputComponent.h"
+
+
+
+void ADroneFPCharacter::OnToggleCalibration(const FInputActionValue& Value)
+{
+	if (!AxisAgg) return;
+
+	if (AxisAgg->IsCalibrating())
+	{
+		AxisAgg->StopCalibration(true);  // keep results
+	}
+	else
+	{
+		AxisAgg->StartCalibration();
 	}
 }
 

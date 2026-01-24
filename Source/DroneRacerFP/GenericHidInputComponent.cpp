@@ -172,17 +172,17 @@ void UGenericHidInputComponent::Start()
 
     Rid[0].usUsagePage = 0x01; // Generic Desktop
     Rid[0].usUsage = 0x04; // Joystick
-    Rid[0].dwFlags = RIDEV_INPUTSINK;
+    Rid[0].dwFlags = 0;
     Rid[0].hwndTarget = nullptr;
 
     Rid[1].usUsagePage = 0x01;
     Rid[1].usUsage = 0x05; // Gamepad
-    Rid[1].dwFlags = RIDEV_INPUTSINK;
+    Rid[1].dwFlags = 0;
     Rid[1].hwndTarget = nullptr;
 
     Rid[2].usUsagePage = 0x01;
     Rid[2].usUsage = 0x08; // Multi-axis controller
-    Rid[2].dwFlags = RIDEV_INPUTSINK;
+    Rid[2].dwFlags = 0;
     Rid[2].hwndTarget = nullptr;
 
     if (!RegisterRawInputDevices(Rid, 3, sizeof(RAWINPUTDEVICE)))
@@ -338,6 +338,7 @@ void UGenericHidInputComponent::HandleRawInput(void* RawInputHandle)
     if (!bStarted)
         return;
 
+#if PLATFORM_WINDOWS
     HRAWINPUT hRawInput = (HRAWINPUT)RawInputHandle;
 
     UINT Size = 0;
@@ -356,6 +357,7 @@ void UGenericHidInputComponent::HandleRawInput(void* RawInputHandle)
 
     HANDLE DeviceHandle = RI->header.hDevice;
 
+    // Find or create device state
     TSharedPtr<FDeviceState> Device = Devices.FindRef((void*)DeviceHandle);
     if (!Device.IsValid())
     {
@@ -379,49 +381,92 @@ void UGenericHidInputComponent::HandleRawInput(void* RawInputHandle)
 
     PHIDP_PREPARSED_DATA PreparsedPtr = (PHIDP_PREPARSED_DATA)Device->Preparsed.GetData();
 
-    const BYTE* ReportData = RI->data.hid.bRawData;
+    // RawInput HID can contain multiple reports
+    const BYTE* Raw = RI->data.hid.bRawData;
     const UINT  ReportSize = RI->data.hid.dwSizeHid;
+    const UINT  ReportCount = RI->data.hid.dwCount;
+
+    auto NormalizeCentered = [](LONG v, LONG minV, LONG maxV, float& out) -> bool
+        {
+            if (maxV == minV)
+                return false;
+
+            const double dMin = (double)minV;
+            const double dMax = (double)maxV;
+            const double mid = 0.5 * (dMin + dMax);
+            const double half = 0.5 * (dMax - dMin);
+
+            if (half <= 0.0)
+                return false;
+
+            out = (float)(((double)v - mid) / half);
+            out = FMath::Clamp(out, -1.f, 1.f);
+            return true;
+        };
 
     bool bAnyAxisChanged = false;
 
-    for (const HIDP_VALUE_CAPS& VC : Device->ValueCaps)
+    for (UINT RepIdx = 0; RepIdx < ReportCount; ++RepIdx)
     {
-        // Most sticks/sliders are on Generic Desktop page; keep this filter for now.
-        if (VC.UsagePage != 0x01)
-            continue;
+        const BYTE* ReportData = Raw + RepIdx * ReportSize;
 
-        const bool bRanged = (VC.IsRange != 0);
-
-        const USAGE U0 = bRanged ? VC.Range.UsageMin : VC.NotRange.Usage;
-        const USAGE U1 = bRanged ? VC.Range.UsageMax : VC.NotRange.Usage;
-
-        for (USAGE U = U0; U <= U1; ++U)
+        for (const HIDP_VALUE_CAPS& VC : Device->ValueCaps)
         {
-            const int32 AxisIdx = UsageToAxisIndex(U);
-            if (AxisIdx < 0 || !Device->Axes.IsValidIndex(AxisIdx))
+            // Keep Generic Desktop filter (you can relax later if needed)
+            if (VC.UsagePage != 0x01)
                 continue;
 
-            ULONG Value = 0;
-            const NTSTATUS S = HidP_GetUsageValue(
-                HidP_Input,
-                VC.UsagePage,
-                0,
-                U,
-                &Value,
-                PreparsedPtr,
-                (PCHAR)ReportData,
-                ReportSize);
+            const bool bRanged = (VC.IsRange != 0);
 
-            if (S != HIDP_STATUS_SUCCESS)
-                continue;
+            const USAGE U0 = bRanged ? VC.Range.UsageMin : VC.NotRange.Usage;
+            const USAGE U1 = bRanged ? VC.Range.UsageMax : VC.NotRange.Usage;
 
-            float Norm = 0.f;
-            NormalizeHidValueToFloat((LONG)Value, VC.LogicalMin, VC.LogicalMax, Norm);
-
-            if (!FMath::IsNearlyEqual(Device->Axes[AxisIdx], Norm, 1e-4f))
+            for (USAGE U = U0; U <= U1; ++U)
             {
-                Device->Axes[AxisIdx] = Norm;
-                bAnyAxisChanged = true;
+                const int32 AxisIdx = UsageToAxisIndex(U);
+                if (AxisIdx < 0 || !Device->Axes.IsValidIndex(AxisIdx))
+                    continue;
+
+                // Read as *signed / scaled* to avoid wraparound issues
+                LONG Scaled = 0;
+                const NTSTATUS S = HidP_GetScaledUsageValue(
+                    HidP_Input,
+                    VC.UsagePage,
+                    0,
+                    U,
+                    &Scaled,
+                    PreparsedPtr,
+                    (PCHAR)ReportData,
+                    ReportSize);
+
+                if (S != HIDP_STATUS_SUCCESS)
+                    continue;
+
+                float Norm = 0.f;
+
+                // Prefer descriptor min/max, but if they’re bogus, fall back to ValueCaps fields.
+                LONG LMin = (LONG)VC.LogicalMin;
+                LONG LMax = (LONG)VC.LogicalMax;
+
+                // If min/max are invalid (some devices lie), try Physical; if still bad, skip.
+                if (LMax == LMin)
+                {
+                    LMin = (LONG)VC.PhysicalMin;
+                    LMax = (LONG)VC.PhysicalMax;
+                }
+
+                if (!NormalizeCentered(Scaled, LMin, LMax, Norm))
+                {
+                    // As a last resort, clamp something sane
+                    // (keeps you from seeing crazy 32/64 outputs)
+                    Norm = 0.f;
+                }
+
+                if (!FMath::IsNearlyEqual(Device->Axes[AxisIdx], Norm, 1e-4f))
+                {
+                    Device->Axes[AxisIdx] = Norm;
+                    bAnyAxisChanged = true;
+                }
             }
         }
     }
@@ -445,6 +490,7 @@ void UGenericHidInputComponent::HandleRawInput(void* RawInputHandle)
 
         OnAxesUpdated.Broadcast(Out);
     }
+#endif // PLATFORM_WINDOWS
 }
 
 #endif // PLATFORM_WINDOWS

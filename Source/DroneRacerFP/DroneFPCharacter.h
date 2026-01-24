@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "InputAction.h"
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -74,13 +75,17 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input")
     UInputAction* IA_Look;
 
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input")
+    UInputAction* IA_StartCalibration=nullptr;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|FPV")
     float CameraTiltDegrees = 20.0f;   // 0–40 typical FPV range;
 
     UPROPERTY(VisibleAnywhere, Category = "Camera")
     USceneComponent* CameraTiltPivot;
 
-  
+    UFUNCTION()
+    void OnToggleCalibration(const FInputActionValue& Value);
 
     // ===== Raw input state (normalized stick values) =====
 
@@ -210,6 +215,10 @@ protected:
     float MinEnergyForDamage = 5.f;      // J-ish
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight|Health")
     float MaxEnergyForMaxDamage = 100.f; // J-ish
+
+    UFUNCTION()
+    void OnGenericHidAxesUpdated(const FGenericHidDeviceAxes& Axes);
+
 
 
     // ===== Input handlers (Enhanced Input) =====

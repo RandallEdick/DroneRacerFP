@@ -2,81 +2,114 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "ControllerCalibration.h"          // for FControllerRawState
+#include "ControllerCalibration.h" // FControllerRawState, FAxisCalibration
 #include "ControllerAxisAggregatorComponent.generated.h"
 
-/**
- * Collects "raw axis" values from UE input axis mappings (Project Settings -> Input)
- * into a simple array that can be polled each frame.
- *
- * You bind axis mappings (FName) to Axis1..Axis16 handler functions.
- * Then call GetRawState() to retrieve DeviceId + Axes[].
- */
-UCLASS(ClassGroup = (Input), meta = (BlueprintSpawnableComponent))
-class UControllerAxisAggregatorComponent : public UActorComponent
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
+class DRONERACERFP_API UControllerAxisAggregatorComponent : public UActorComponent
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
 public:
-    UControllerAxisAggregatorComponent();
+	UControllerAxisAggregatorComponent();
 
-    /** Stable id used to key calibration (start with "Player0"; later upgrade if you can). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Calibration")
-    FString DeviceId = TEXT("Player0");
+	/** Clamp NumAxes and size arrays. */
+	UFUNCTION(BlueprintCallable, Category = "AxisAggregator")
+	void EnsureAxesSize();
 
-    /** How many axes you plan to collect (1..16). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Axes", meta = (ClampMin = "1", ClampMax = "16"))
-    int32 NumAxes = 8;
+	/** Clears Axes[] to 0. */
+	UFUNCTION(BlueprintCallable, Category = "AxisAggregator")
+	void ClearAxes();
 
-    /**
-     * Axis mapping names in the order you want to expose them in OutState.Axes.
-     * Example: ["RawAxis1","RawAxis2","RawAxis3","RawAxis4",...]
-     *
-     * These must match the names you created in Project Settings -> Input -> Axis Mappings.
-     */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Axes")
-    TArray<FName> AxisMappingNames;
+	/** Copies current raw state into OutState. */
+	UFUNCTION(BlueprintCallable, Category = "AxisAggregator")
+	bool GetRawState(FControllerRawState& OutState) const;
 
-    /** Returns DeviceId + the latest axis array. Safe to call every frame. */
-    UFUNCTION(BlueprintCallable, Category = "Calibration")
-    bool GetRawState(FControllerRawState& OutState) const;
+	/**
+	 * Bind axis mappings on a classic UInputComponent (BindAxis).
+	 * Uses AxisMappingNames if provided, otherwise defaults to RawAxis1..RawAxisN.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AxisAggregator")
+	void BindAxisMappings(UInputComponent* InputComponent);
 
-    /**
-     * Bind axis mapping names to the internal handlers.
-     * Call this from Pawn/Controller after InputComponent exists (e.g. SetupPlayerInputComponent).
-     */
-    void BindAxisMappings(class UInputComponent* InputComponent);
+	// ---------------- Calibration ----------------
 
-    /** Optional: zero all axes */
-    UFUNCTION(BlueprintCallable, Category = "Axes")
-    void ClearAxes();
+	/** Start capturing min/max (and optionally center) per axis. */
+	UFUNCTION(BlueprintCallable, Category = "Calibration")
+	void StartCalibration();
+
+	/** Stop capturing. If bKeepResults=false, resets to current values. */
+	UFUNCTION(BlueprintCallable, Category = "Calibration")
+	void StopCalibration(bool bKeepResults = true);
+
+	/** Convenience: press once start, press again stop. */
+	UFUNCTION(BlueprintCallable, Category = "Calibration")
+	void ToggleCalibration();
+
+	UFUNCTION(BlueprintPure, Category = "Calibration")
+	bool IsCalibrating() const { return bIsCalibrating; }
+
+	/** One FAxisCalibration per axis index (size == NumAxes). Useful for UI. */
+	UFUNCTION(BlueprintPure, Category = "Calibration")
+	const TArray<FAxisCalibration>& GetAxisCalibrations() const { return AxisCalibs; }
+
+public:
+	/** Device id string you can set upstream (or leave empty). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AxisAggregator")
+	FString DeviceId;
+
+	/** How many axes to aggregate (clamped 1..16). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AxisAggregator", meta = (ClampMin = "1", ClampMax = "16"))
+	int32 NumAxes = 8;
+
+	/**
+	 * Optional list of axis mapping names (length can be >= NumAxes).
+	 * If empty, defaults to RawAxis1..RawAxisN.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AxisAggregator")
+	TArray<FName> AxisMappingNames;
+
+	/** Current aggregated axis values (size == NumAxes). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AxisAggregator")
+	TArray<float> Axes;
+
+	/**
+	 * If true: while calibrating, RawCenter is slowly pulled toward current value.
+	 * This helps if you release the stick to center during calibration.
+	 * If false: RawCenter is captured once at StartCalibration.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Calibration")
+	bool bUpdateCenterWhileCalibrating = true;
+
+	/** How quickly center adapts during calibration (0..1). Smaller = slower. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Calibration", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CenterLerpAlpha = 0.02f;
+
+protected:
+	void SetAxisValue(int32 Index0, float v);
+
+	// BindAxis requires UFUNCTION signature void Func(float)
+	UFUNCTION() void Axis1(float v);
+	UFUNCTION() void Axis2(float v);
+	UFUNCTION() void Axis3(float v);
+	UFUNCTION() void Axis4(float v);
+	UFUNCTION() void Axis5(float v);
+	UFUNCTION() void Axis6(float v);
+	UFUNCTION() void Axis7(float v);
+	UFUNCTION() void Axis8(float v);
+	UFUNCTION() void Axis9(float v);
+	UFUNCTION() void Axis10(float v);
+	UFUNCTION() void Axis11(float v);
+	UFUNCTION() void Axis12(float v);
+	UFUNCTION() void Axis13(float v);
+	UFUNCTION() void Axis14(float v);
+	UFUNCTION() void Axis15(float v);
+	UFUNCTION() void Axis16(float v);
 
 private:
-    /** Latest axis values (size = NumAxes). */
-    UPROPERTY()
-    TArray<float> Axes;
+	bool bIsCalibrating = false;
 
-private:
-    void EnsureAxesSize();
-
-    // 16 fixed handlers so we can BindAxis by function pointer
-    UFUNCTION() void Axis1(float v);
-    UFUNCTION() void Axis2(float v);
-    UFUNCTION() void Axis3(float v);
-    UFUNCTION() void Axis4(float v);
-    UFUNCTION() void Axis5(float v);
-    UFUNCTION() void Axis6(float v);
-    UFUNCTION() void Axis7(float v);
-    UFUNCTION() void Axis8(float v);
-    UFUNCTION() void Axis9(float v);
-    UFUNCTION() void Axis10(float v);
-    UFUNCTION() void Axis11(float v);
-    UFUNCTION() void Axis12(float v);
-    UFUNCTION() void Axis13(float v);
-    UFUNCTION() void Axis14(float v);
-    UFUNCTION() void Axis15(float v);
-    UFUNCTION() void Axis16(float v);
-
-    void SetAxisValue(int32 Index0, float v);
+	/** One per axis index (size == NumAxes). */
+	UPROPERTY(VisibleAnywhere, Category = "Calibration")
+	TArray<FAxisCalibration> AxisCalibs;
 };
-
