@@ -2,6 +2,35 @@
 
 #include "DroneControllerCalibrationWidget.h"
 
+bool UDroneControllerCalibrationWidget::GetRawStateBP(FControllerRawState& OutState) const
+{
+    if (!AxisAgg) return false;
+    return AxisAgg->GetRawState(OutState);
+}
+
+TArray<FAxisCalibration> UDroneControllerCalibrationWidget::GetAxisCalibrationsBP() const
+{
+    if (!AxisAgg) return {};
+    return AxisAgg->GetAxisCalibrations(); // returns const ref in your component, but we copy for BP
+}
+
+bool UDroneControllerCalibrationWidget::GetMappedAxisIndexBP(FName LogicalName, int32& OutAxisIndex) const
+{
+    OutAxisIndex = INDEX_NONE;
+    const FAxisMapping* M = PendingCalibration.FindMapping(LogicalName);
+    if (!M) return false;
+    OutAxisIndex = M->AxisIndex;
+    return OutAxisIndex != INDEX_NONE;
+}
+
+bool UDroneControllerCalibrationWidget::GetLogicalCalibrationBP(FName LogicalName, FAxisCalibration& OutCalib) const
+{
+    const FAxisMapping* M = PendingCalibration.FindMapping(LogicalName);
+    if (!M) return false;
+    OutCalib = M->Calibration;
+    return true;
+}
+
 void UDroneControllerCalibrationWidget::NativeConstruct()
 {
     Super::NativeConstruct();
@@ -318,3 +347,7 @@ bool UDroneControllerCalibrationWidget::IsAxisAlreadyUsed(int32 AxisIndex) const
     return UsedAxisIndices.Contains(AxisIndex);
 }
 
+void UDroneControllerCalibrationWidget::InitWithAxisAggregator(UControllerAxisAggregatorComponent* InAxisAgg)
+{
+    AxisAgg = InAxisAgg;
+}

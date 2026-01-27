@@ -9,6 +9,9 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
+#include "DroneControllerCalibrationWidget.h"
+#include "Blueprint/UserWidget.h"
+#include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/Engine.h"
 
@@ -310,10 +313,12 @@ void ADroneFPCharacter::OnToggleCalibration(const FInputActionValue& Value)
 	if (AxisAgg->IsCalibrating())
 	{
 		AxisAgg->StopCalibration(true);  // keep results
+		HideCalibrationUI();
 	}
 	else
 	{
 		AxisAgg->StartCalibration();
+		ShowCalibrationUI();
 	}
 }
 
@@ -925,4 +930,74 @@ void ADroneFPCharacter::TrySetupEnhancedInput()
 
 	Subsys->AddMappingContext(IMC_Default, 0);
 	UE_LOG(LogTemp, Warning, TEXT("TrySetupEnhancedInput: Added IMC_Default"));
+}
+
+void ADroneFPCharacter::ShowCalibrationUI()
+{
+	UE_LOG(LogTemp, Warning, TEXT("ShowCalibrationUI ENTER Pawn=%s Local=%d Controller=%s"),
+		*GetNameSafe(this), IsLocallyControlled(), *GetNameSafe(GetController()));
+
+	if (!IsLocallyControlled())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ShowCalibrationUI EXIT: not locally controlled"));
+		return;
+	}
+
+	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+	if (!PC)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ShowCalibrationUI EXIT: PC null"));
+		return;
+	}
+
+	if (!CalibrationWidgetClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ShowCalibrationUI EXIT: CalibrationWidgetClass is null (set it in BP)"));
+		return;
+	}
+
+	if (!CalibrationWidget)
+	{
+		CalibrationWidget = CreateWidget<UDroneControllerCalibrationWidget>(PC, CalibrationWidgetClass);
+		if (!CalibrationWidget)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ShowCalibrationUI EXIT: CreateWidget returned null"));
+			return;
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("ShowCalibrationUI: widget created %s"), *GetNameSafe(CalibrationWidget));
+		CalibrationWidget->InitWithAxisAggregator(AxisAgg);
+	}
+
+	CalibrationWidget->SetVisibility(ESlateVisibility::Visible);
+	UE_LOG(LogTemp, Warning, TEXT("ShowCalibrationUI: adding to viewport"));
+	CalibrationWidget->AddToViewport(100);
+
+	CalibrationWidget->RemoveFromParent();
+	CalibrationWidget->AddToViewport(9999);
+
+	UE_LOG(LogTemp, Warning, TEXT("ShowCalibrationUI: IsInViewport=%d Visibility=%d"),
+		CalibrationWidget->IsInViewport(),
+		(int32)CalibrationWidget->GetVisibility());
+
+	PC->bShowMouseCursor = true;
+	PC->SetInputMode(FInputModeGameAndUI());
+}
+
+void ADroneFPCharacter::HideCalibrationUI()
+{
+	APlayerController* PC = Cast<APlayerController>(GetController());
+
+	if (CalibrationWidget && CalibrationWidget->IsInViewport())
+	{
+		CalibrationWidget->RemoveFromParent();
+	}
+
+	if (PC)
+	{
+		// Restore game-only input
+		FInputModeGameOnly Mode;
+		PC->SetInputMode(Mode);
+		PC->bShowMouseCursor = false;
+	}
 }

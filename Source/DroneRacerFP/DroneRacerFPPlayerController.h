@@ -19,8 +19,10 @@ class DRONERACERFP_API ADroneRacerFPPlayerController : public APlayerController
 {
 	GENERATED_BODY()
 	
+public:
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	UInputAction* IA_StartCalibration;
 protected:
-
 	/** Input Mapping Context to be used for player input */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input)
 	UInputMappingContext* InputMappingContext;
@@ -30,8 +32,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<class UDroneControllerCalibrationWidget> CalibrationWidgetClass;
 
-	UPROPERTY(EditDefaultsOnly, Category = "Input")
-	UInputAction* IA_StartCalibration;
+
 
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	UInputMappingContext* IMC_Default;

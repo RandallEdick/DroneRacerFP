@@ -14,7 +14,7 @@ class UCameraComponent;
 class UInputAction;
 class USceneComponent;
 class USkeletalMeshComponent;
-
+class UDroneControllerCalibrationWidget;
 /**
  * Physics-based first-person drone character, DJI Mode 2 controls.
  *
@@ -83,6 +83,18 @@ protected:
 
     UPROPERTY(VisibleAnywhere, Category = "Camera")
     USceneComponent* CameraTiltPivot;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI", meta = (AllowPrivateAccess = "true"))
+    TSubclassOf<UUserWidget> CalibrationWidgetClass;
+
+    UPROPERTY(Transient)
+    TObjectPtr<UDroneControllerCalibrationWidget> CalibrationWidget = nullptr;
+
+    UFUNCTION()
+    void ShowCalibrationUI();
+
+    UFUNCTION()
+    void HideCalibrationUI();
 
     UFUNCTION()
     void OnToggleCalibration(const FInputActionValue& Value);
